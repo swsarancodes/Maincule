@@ -9,7 +9,20 @@ import {
   syncDocumentHeading,
   extractDocumentHeading,
 } from '../../core/document/document';
-import { formatDisplayName } from '../../core/document/file-meta';
+import { formatDisplayName, detectFileMeta } from '../../core/document/file-meta';
+import {
+  saveDocToDisk,
+  forceSaveDocToDisk,
+  VaultConflictError,
+  openVaultDialog,
+  setVaultRoot,
+  listVaultFiles,
+  startVaultWatch,
+  stopVaultWatch,
+} from '../../ipc/vault';
+import type { VaultEntry, VaultChangeEvent } from '../../ipc/vault';
+import { isTauriEnvironment, readFile } from '../../ipc/client';
+import type { FileReadResult } from '../../ipc/client';
 
 const WELCOME_DOC = `# Manicule ☞
 
@@ -104,6 +117,10 @@ export interface WorkspaceState {
   wordCount: number;
   charCount: number;
   readingTimeMin: number;
+  /** Canonicalized vault root picked via the native dialog (desktop only). */
+  vaultRoot: string | null;
+  /** Last scan of the vault root (never persisted — rescanned on launch). */
+  vaultEntries: VaultEntry[];
 
   createEmptyDocument: (title?: string, parentId?: string | null) => void;
   createFolder: (name?: string, parentId?: string | null) => void;
@@ -121,6 +138,20 @@ export interface WorkspaceState {
   updateDocumentContent: (id: string, newContent: string) => void;
   renameDocument: (id: string, newName: string) => void;
   reorderDocument: (fromId: string, toId: string | null, position?: 'before' | 'after') => void;
+  openVault: () => Promise<void>;
+  refreshVault: () => Promise<void>;
+  openVaultFile: (path: string) => Promise<void>;
+  closeVault: () => void;
+  /** Subscribe to backend watcher events (idempotent; desktop only). */
+  startVaultSync: () => void;
+  /** Conflict banner: overwrite disk with editor content. */
+  resolveConflictKeepMine: (id: string) => Promise<void>;
+  /** Conflict banner: discard edits, adopt disk content. */
+  resolveConflictLoadDisk: (id: string) => Promise<void>;
+  /** Deleted banner: write the open doc back to its path. */
+  saveBackDeletedFile: (id: string) => Promise<void>;
+  /** Deleted banner: keep the doc open without its file. */
+  dismissDeletedFile: (id: string) => void;
   markDocumentSaved: (id: string, newPath?: string) => void;
   updateCursorPosition: (line: number, col: number) => void;
   updateCursorStats: (line: number, col: number) => void;
@@ -240,6 +271,201 @@ function applyAutoRename(id: string): void {
   }));
 }
 
+// ---------------------------------------------------------------------------
+// Debounced vault autosave (desktop only)
+//
+// Docs with a filePath save 500ms after the last edit via an atomic,
+// hash-guarded Rust write. Untitled docs (no path) and the browser build are
+// untouched — they keep the localStorage model until B2's Save flow.
+// ---------------------------------------------------------------------------
+
+const AUTOSAVE_DELAY_MS = 500;
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingSaveIds = new Set<string>();
+const inflightSaveIds = new Set<string>();
+
+function scheduleAutosave(id: string): void {
+  if (!isTauriEnvironment()) return;
+  const doc = useWorkspaceStore.getState().documents.find((d) => d.id === id);
+  if (!doc || !doc.meta.filePath || doc.deletedAt) return;
+  pendingSaveIds.add(id);
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    const ids = [...pendingSaveIds];
+    pendingSaveIds.clear();
+    for (const targetId of ids) void flushDocSave(targetId);
+  }, AUTOSAVE_DELAY_MS);
+}
+
+async function flushDocSave(id: string): Promise<void> {
+  if (!isTauriEnvironment()) return;
+  if (inflightSaveIds.has(id)) {
+    // A save for this doc is already running: re-queue so the newest text
+    // lands in a follow-up write instead of racing it (a race would surface
+    // as a false conflict from the hash guard).
+    pendingSaveIds.add(id);
+    return;
+  }
+  const doc = useWorkspaceStore.getState().documents.find((d) => d.id === id);
+  if (!doc || !doc.meta.filePath || doc.deletedAt) return;
+
+  inflightSaveIds.add(id);
+  try {
+    const { hash, mtime, savedText } = await saveDocToDisk(doc);
+    applySaveSuccess(id, hash, mtime, savedText);
+  } catch (e) {
+    if (e instanceof VaultConflictError) {
+      useWorkspaceStore.setState((s) => ({
+        documents: s.documents.map((d) => (d.id === id ? { ...d, syncConflict: true } : d)),
+      }));
+    } else {
+      console.warn('Autosave failed:', e);
+    }
+  } finally {
+    inflightSaveIds.delete(id);
+    // Edits that landed mid-save re-queued above — flush them now.
+    if (pendingSaveIds.has(id)) {
+      pendingSaveIds.delete(id);
+      await flushDocSave(id);
+    }
+  }
+}
+
+/**
+ * Shared post-save bookkeeping: the saved text becomes the new clean baseline,
+ * the Rust-issued hash arms the next conflict guard, and the timestamp tells
+ * the watcher to ignore its own echo.
+ */
+function applySaveSuccess(id: string, hash: string, mtime: number, savedText: string): void {
+  const path = useWorkspaceStore.getState().documents.find((d) => d.id === id)?.meta.filePath;
+  if (path) lastOwnSaveAt.set(path, Date.now());
+  useWorkspaceStore.setState((s) => ({
+    documents: s.documents.map((d) => {
+      if (d.id !== id) return d;
+      return {
+        ...d,
+        initialText: savedText,
+        isDirty: d.currentText !== savedText,
+        syncConflict: false,
+        syncDeleted: false,
+        meta: { ...d.meta, hash, mtime },
+      };
+    }),
+  }));
+}
+
+/** Test hook: run pending autosaves now instead of on a timer. */
+export async function flushPendingSaves(): Promise<void> {
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
+  const ids = [...pendingSaveIds];
+  pendingSaveIds.clear();
+  for (const targetId of ids) await flushDocSave(targetId);
+}
+
+// ---------------------------------------------------------------------------
+// External-change reconciliation (desktop vault only)
+//
+// Backend watcher events land here via startVaultSync's listener. Per-path
+// debounced; our own saves are ignored by timestamp AND by content hash, so a
+// save echo can never prompt. Three outcomes for an open doc:
+//   clean + disk changed  -> silent reload (adopt disk content)
+//   dirty + disk changed  -> syncConflict banner (Keep mine / Load disk)
+//   file gone on disk     -> syncDeleted banner (Save it back / Keep open)
+// ---------------------------------------------------------------------------
+
+const RECONCILE_DEBOUNCE_MS = 400;
+const OWN_SAVE_QUIET_MS = 1500;
+const reconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const lastOwnSaveAt = new Map<string, number>();
+let vaultSyncActive = false;
+
+/** Replace a doc's content with disk state (silent reload / Load disk). */
+function adoptDiskResult(id: string, result: FileReadResult): void {
+  const { text, meta } = detectFileMeta(result.text, result.path);
+  useWorkspaceStore.setState((s) => {
+    const nextDocs = s.documents.map((d) => {
+      if (d.id !== id) return d;
+      return {
+        ...d,
+        currentText: text,
+        initialText: text,
+        isDirty: false,
+        syncConflict: false,
+        syncDeleted: false,
+        meta: {
+          ...meta,
+          lineEnding: (result.line_ending === 'crlf' ? 'crlf' : 'lf') as 'lf' | 'crlf',
+          hasBOM: result.has_bom,
+          finalNewline: result.final_newline,
+          mtime: result.mtime,
+          hash: result.hash,
+        },
+      };
+    });
+    const activeDoc = nextDocs.find((d) => d.id === s.activeDocumentId);
+    const viewingAdopted = s.activeDocumentId === id;
+    return {
+      documents: nextDocs,
+      wordCount: viewingAdopted ? computeWordCount(text) : activeDoc ? computeWordCount(activeDoc.currentText) : s.wordCount,
+      charCount: viewingAdopted ? text.length : activeDoc ? activeDoc.currentText.length : s.charCount,
+      readingTimeMin: viewingAdopted
+        ? computeReadingTime(computeWordCount(text))
+        : activeDoc
+          ? computeReadingTime(computeWordCount(activeDoc.currentText))
+          : s.readingTimeMin,
+    };
+  });
+}
+
+async function reconcileVaultPath(path: string): Promise<void> {
+  const fileName = path.split(/[/\\]/).pop() ?? '';
+  // Our atomic-write temp files and hidden files never concern the UI.
+  if (!fileName || fileName.startsWith('.tmp_') || fileName.startsWith('.')) return;
+  const lastOwn = lastOwnSaveAt.get(path);
+  if (lastOwn && Date.now() - lastOwn < OWN_SAVE_QUIET_MS) return;
+
+  const st = useWorkspaceStore.getState();
+  const doc = st.documents.find((d) => d.meta.filePath === path && !d.deletedAt);
+
+  // The tree may have changed (created / removed / renamed) — resnapshot.
+  // Concurrent scans are idempotent full snapshots; last write wins converges.
+  await st.refreshVault();
+
+  if (!doc) return;
+
+  let result: FileReadResult;
+  try {
+    result = await readFile(path);
+  } catch {
+    useWorkspaceStore.setState((s) => ({
+      documents: s.documents.map((d) => (d.id === doc.id ? { ...d, syncDeleted: true } : d)),
+    }));
+    return;
+  }
+
+  if (result.hash === doc.meta.hash) {
+    // Same bytes (save echo, chmod, touch, or remove+recreate dance): freshen mtime.
+    useWorkspaceStore.setState((s) => ({
+      documents: s.documents.map((d) =>
+        d.id === doc.id ? { ...d, syncDeleted: false, meta: { ...d.meta, mtime: result.mtime } } : d
+      ),
+    }));
+    return;
+  }
+
+  if (!doc.isDirty) {
+    adoptDiskResult(doc.id, result);
+  } else {
+    useWorkspaceStore.setState((s) => ({
+      documents: s.documents.map((d) => (d.id === doc.id ? { ...d, syncConflict: true } : d)),
+    }));
+  }
+}
+
 export const useWorkspaceStore = create<WorkspaceState>()(
   persist(
     (set, get) => ({
@@ -252,6 +478,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       wordCount: computeWordCount(WELCOME_DOC),
       charCount: WELCOME_DOC.length,
       readingTimeMin: computeReadingTime(computeWordCount(WELCOME_DOC)),
+      vaultRoot: null,
+      vaultEntries: [],
 
       createEmptyDocument: (title?: string, parentId: string | null = null) => {
         set((state) => {
@@ -635,6 +863,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             readingTimeMin: activeDoc ? computeReadingTime(computeWordCount(activeDoc.currentText)) : state.readingTimeMin,
           };
         });
+
+        // Renaming rewrites the first heading line: persist it like any edit.
+        scheduleAutosave(id);
       },
 
       reorderDocument: (fromId: string, toId: string | null, position: 'before' | 'after' = 'before') => {
@@ -673,6 +904,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         // Heading auto-rename is debounced (see scheduleAutoRename): the text
         // lands immediately, the tab label settles after the user pauses typing.
         scheduleAutoRename(id);
+        // Same for vault autosave: disk writes trail typing by 500ms.
+        scheduleAutosave(id);
       },
 
       markDocumentSaved: (id: string, newPath?: string) => {
@@ -693,6 +926,145 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             }
             return doc;
           }),
+        }));
+      },
+
+      openVault: async () => {
+        if (!isTauriEnvironment()) return;
+        const picked = await openVaultDialog();
+        if (!picked) return;
+        const root = await setVaultRoot(picked);
+        const entries = await listVaultFiles();
+        set({ vaultRoot: root, vaultEntries: entries });
+        try {
+          await startVaultWatch();
+        } catch (e) {
+          console.warn('Vault watch failed:', e);
+        }
+      },
+
+      refreshVault: async () => {
+        const { vaultRoot } = get();
+        if (!isTauriEnvironment() || !vaultRoot) return;
+        try {
+          // Re-register in case the backend restarted; then rescan.
+          await setVaultRoot(vaultRoot);
+          const entries = await listVaultFiles();
+          set({ vaultEntries: entries });
+        } catch (e) {
+          console.warn('Vault refresh failed:', e);
+        }
+      },
+
+      openVaultFile: async (path: string) => {
+        const existing = get().documents.find(
+          (d) => d.meta.filePath === path && !d.deletedAt
+        );
+        if (existing) {
+          set({ activeDocumentId: existing.id });
+          return;
+        }
+        const result = await readFile(path);
+        const doc = createDocumentState(result.text, result.path);
+        doc.hasCustomName = true;
+        // Rust's byte-level analysis is authoritative (BOM already stripped).
+        doc.meta = {
+          ...doc.meta,
+          lineEnding: result.line_ending === 'crlf' ? 'crlf' : 'lf',
+          hasBOM: result.has_bom,
+          finalNewline: result.final_newline,
+          mtime: result.mtime,
+          hash: result.hash,
+        };
+        set((state) => ({
+          documents: [...state.documents, doc],
+          activeDocumentId: doc.id,
+          wordCount: computeWordCount(doc.currentText),
+          charCount: doc.currentText.length,
+          readingTimeMin: computeReadingTime(computeWordCount(doc.currentText)),
+        }));
+      },
+
+      closeVault: () => {
+        if (isTauriEnvironment()) {
+          stopVaultWatch().catch(() => {});
+        }
+        set({ vaultRoot: null, vaultEntries: [] });
+      },
+
+      startVaultSync: () => {
+        if (vaultSyncActive || !isTauriEnvironment()) return;
+        vaultSyncActive = true;
+        void (async () => {
+          try {
+            const { listen } = await import('@tauri-apps/api/event');
+            if (useWorkspaceStore.getState().vaultRoot) {
+              await startVaultWatch().catch((e) => console.warn('Vault watch failed:', e));
+            }
+            await listen<VaultChangeEvent>('vault://file-changed', (event) => {
+              // Note: `kind` is intentionally unread — by the time the debounce
+              // fires we re-read the file and compare hashes, which subsumes
+              // created/modified/removed races (e.g. atomic-save dances).
+              const { path } = event.payload;
+              const prev = reconcileTimers.get(path);
+              if (prev) clearTimeout(prev);
+              reconcileTimers.set(
+                path,
+                setTimeout(() => {
+                  reconcileTimers.delete(path);
+                  void reconcileVaultPath(path);
+                }, RECONCILE_DEBOUNCE_MS)
+              );
+            });
+          } catch (e) {
+            console.warn('Vault sync failed:', e);
+            vaultSyncActive = false;
+          }
+        })();
+      },
+
+      resolveConflictKeepMine: async (id: string) => {
+        const doc = get().documents.find((d) => d.id === id);
+        if (!doc || !doc.meta.filePath) return;
+        try {
+          const { hash, mtime, savedText } = await forceSaveDocToDisk(doc);
+          applySaveSuccess(id, hash, mtime, savedText);
+        } catch (e) {
+          console.warn('Keep-mine save failed:', e);
+        }
+      },
+
+      resolveConflictLoadDisk: async (id: string) => {
+        const doc = get().documents.find((d) => d.id === id);
+        if (!doc || !doc.meta.filePath) return;
+        try {
+          const result = await readFile(doc.meta.filePath);
+          adoptDiskResult(id, result);
+        } catch {
+          // File vanished between event and click — show the deleted banner.
+          set((s) => ({
+            documents: s.documents.map((d) =>
+              d.id === id ? { ...d, syncConflict: false, syncDeleted: true } : d
+            ),
+          }));
+        }
+      },
+
+      saveBackDeletedFile: async (id: string) => {
+        const doc = get().documents.find((d) => d.id === id);
+        if (!doc || !doc.meta.filePath) return;
+        try {
+          const { hash, mtime, savedText } = await forceSaveDocToDisk(doc);
+          applySaveSuccess(id, hash, mtime, savedText);
+          await get().refreshVault();
+        } catch (e) {
+          console.warn('Save-back failed:', e);
+        }
+      },
+
+      dismissDeletedFile: (id: string) => {
+        set((s) => ({
+          documents: s.documents.map((d) => (d.id === id ? { ...d, syncDeleted: false } : d)),
         }));
       },
 
@@ -718,11 +1090,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         folders: state.folders,
         collapsedIds: state.collapsedIds,
         activeDocumentId: state.activeDocumentId,
+        vaultRoot: state.vaultRoot,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
           state.folders = state.folders || [];
           state.collapsedIds = state.collapsedIds || [];
+          // Vault entries are never persisted — rescanned on launch (App mount).
+          state.vaultRoot = state.vaultRoot ?? null;
+          state.vaultEntries = [];
 
           if (state.documents && state.documents.length > 0) {
             const seenIds = new Set<string>();
@@ -732,7 +1108,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
                 id = generateDocId();
               }
               seenIds.add(id);
-              return { ...doc, id, parentId: doc.parentId ?? null };
+              // syncConflict / syncDeleted are live-session flags, never restored.
+              return { ...doc, id, parentId: doc.parentId ?? null, syncConflict: false, syncDeleted: false };
             });
 
             const activeDoc =

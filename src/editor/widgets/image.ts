@@ -1,5 +1,7 @@
 import { EditorView } from '@codemirror/view';
 import { MarkdownWidget } from './base';
+import { useWorkspaceStore } from '../../app/stores/workspace';
+import { resolveImageSrc } from '../../ipc/vault';
 
 export interface ParsedImage {
   alt: string;
@@ -78,7 +80,11 @@ export class ImageWidget extends MarkdownWidget {
 
     // 1. Image Element
     const img = document.createElement('img');
-    img.src = this.parsed.url;
+    // Vault-relative URLs resolve to streamable asset URLs in the desktop
+    // shell; the markdown source keeps the portable relative path.
+    const store = useWorkspaceStore.getState();
+    const activeDoc = store.documents.find((d) => d.id === store.activeDocumentId);
+    img.src = resolveImageSrc(this.parsed.url, activeDoc?.meta.filePath ?? null, store.vaultRoot);
     img.alt = this.parsed.alt || 'Markdown Image';
     img.loading = 'lazy';
     img.style.cssText = `

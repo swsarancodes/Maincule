@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { useWorkspaceStore } from '../stores/workspace';
 import { formatDisplayName } from '../../core/document/file-meta';
+import { storeImageFile } from '../../ipc/vault';
 import {
   setHeadingLevel,
   setBulletList,
@@ -256,17 +257,22 @@ export const SlashCommandMenu: React.FC<SlashMenuProps> = ({
           input.onchange = (e: any) => {
             const file = e.target?.files?.[0];
             if (file) {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const dataUrl = reader.result as string;
-                const cleanName = file.name ? file.name.replace(/\.[^/.]+$/, '') : 'Image';
-                const imageMd = `![${cleanName}](${dataUrl})\n`;
+              const cleanName = file.name ? file.name.replace(/\.[^/.]+$/, '') : 'Image';
+              const store = useWorkspaceStore.getState();
+              const activeDoc = store.documents.find((d) => d.id === store.activeDocumentId);
+              void (async () => {
+                // Vault asset when possible; data-URL fallback otherwise.
+                const url = await storeImageFile(
+                  file,
+                  activeDoc?.meta.fileName ?? 'note.md',
+                  store.vaultRoot
+                );
+                const imageMd = `![${cleanName}](${url})\n`;
                 v.dispatch({
                   changes: { from: r.from, to: r.to, insert: imageMd },
                   selection: { anchor: r.from + imageMd.length },
                 });
-              };
-              reader.readAsDataURL(file);
+              })();
             }
           };
           input.click();

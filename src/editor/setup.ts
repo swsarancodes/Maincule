@@ -11,6 +11,8 @@ import { delimiterGuard } from './decorations/delimiter-guard';
 import { lineSelectionExtension } from './decorations/line-selection';
 import { wikilinkAutocompleteExtension } from './completions/wikilink-completion';
 import { AsterismSearchPanel } from './search-panel';
+import { useWorkspaceStore } from '../app/stores/workspace';
+import { storeImageFile, fileToDataUrl } from '../ipc/vault';
 
 export interface EditorSetupOptions {
   initialDoc?: string;
@@ -103,8 +105,9 @@ export function findLinkUrlAt(view: EditorView, pos: number, _targetEl?: HTMLEle
 
 /**
  * Image Paste & Drop Handler:
- * When user pastes an image from clipboard (Cmd+V, screenshot, copied image file)
- * or drops an image file onto the editor, converts to base64 Data URL and inserts ![Image](dataUrl).
+ * Pasted/dropped images become vault assets (`.assets/…`, portable relative
+ * URL) when a vault is open in the desktop shell; otherwise they embed as
+ * inline data URLs exactly like before.
  */
 export function imagePasteDropExtension(): Extension {
   const insertImageAt = (view: EditorView, pos: number, alt: string, url: string) => {
@@ -112,20 +115,34 @@ export function imagePasteDropExtension(): Extension {
     const line = doc.lineAt(pos);
     const needLeadingNewline = pos > line.from && !doc.sliceString(pos - 1, pos).endsWith('\n');
     const imageMarkdown = `${needLeadingNewline ? '\n' : ''}![${alt}](${url})\n`;
+    const livePos = Math.min(pos, view.state.doc.length);
     view.dispatch({
-      changes: { from: pos, insert: imageMarkdown },
-      selection: { anchor: pos + imageMarkdown.length },
+      changes: { from: livePos, insert: imageMarkdown },
+      selection: { anchor: livePos + imageMarkdown.length },
     });
   };
 
   const handleImageFile = (file: File, view: EditorView, pos: number) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      const cleanName = file.name ? file.name.replace(/\.[^/.]+$/, '') : 'Image';
-      insertImageAt(view, pos, cleanName, dataUrl);
-    };
-    reader.readAsDataURL(file);
+    const cleanName = file.name ? file.name.replace(/\.[^/.]+$/, '') : 'Image';
+    const store = useWorkspaceStore.getState();
+    const activeDoc = store.documents.find((d) => d.id === store.activeDocumentId);
+    const docFileName = activeDoc?.meta.fileName ?? 'note.md';
+    void (async () => {
+      try {
+        // Vault asset when possible; data-URL fallback otherwise.
+        const url = await storeImageFile(file, docFileName, store.vaultRoot);
+        if (!view.dom.isConnected) return;
+        insertImageAt(view, pos, cleanName, url);
+      } catch (e) {
+        console.warn('Image store failed, embedding inline:', e);
+        if (!view.dom.isConnected) return;
+        try {
+          insertImageAt(view, pos, cleanName, await fileToDataUrl(file));
+        } catch {
+          // ignore: unreadable file
+        }
+      }
+    })();
   };
 
   return EditorView.domEventHandlers({

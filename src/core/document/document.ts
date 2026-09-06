@@ -34,6 +34,23 @@ export interface DocumentState {
   isDirty: boolean;
   parentId?: string | null;
   deletedAt?: string | null;
+  /**
+   * True once the user (or the filesystem) has explicitly named this document:
+   * via rename, opening a real file, saving to a path, or creating with a title.
+   * Auto-rename from the first heading only applies while this is falsy.
+   */
+  hasCustomName?: boolean;
+  /**
+   * Set when an autosave was refused because the file on disk changed
+   * underneath us (B3 renders this as a conflict banner). Cleared on the next
+   * successful save. Never persisted — recomputed every session.
+   */
+  syncConflict?: boolean;
+  /**
+   * Set when the file on disk backing this doc was deleted externally.
+   * Banner offers "Save it back" / "Keep open". Never persisted.
+   */
+  syncDeleted?: boolean;
 }
 
 export function generateDocId(): string {

@@ -15,9 +15,12 @@ import {
   Trash2,
   ChevronRight,
   ChevronDown,
+  RefreshCw,
 } from 'lucide-react';
 import { formatDisplayName } from '../../core/document/file-meta';
 import { TrashModal } from './TrashModal';
+import { isTauriEnvironment } from '../../ipc/client';
+import { buildVaultTree, VaultTreeNode } from '../../ipc/vault';
 
 export const Sidebar: React.FC = () => {
   const documents = useWorkspaceStore((s) => s.documents);
@@ -38,6 +41,20 @@ export const Sidebar: React.FC = () => {
   const toggleCollapse = useWorkspaceStore((s) => s.toggleCollapse);
   const moveItem = useWorkspaceStore((s) => s.moveItem);
 
+  const vaultRoot = useWorkspaceStore((s) => s.vaultRoot);
+  const vaultEntries = useWorkspaceStore((s) => s.vaultEntries);
+  const openVault = useWorkspaceStore((s) => s.openVault);
+  const refreshVault = useWorkspaceStore((s) => s.refreshVault);
+  const openVaultFile = useWorkspaceStore((s) => s.openVaultFile);
+  const closeVault = useWorkspaceStore((s) => s.closeVault);
+
+  const isDesktop = isTauriEnvironment();
+  const [collapsedVaultRels, setCollapsedVaultRels] = useState<string[]>([]);
+  const vaultTree = React.useMemo(() => buildVaultTree(vaultEntries), [vaultEntries]);
+  const toggleVaultDir = (rel: string) =>
+    setCollapsedVaultRels((prev) => (prev.includes(rel) ? prev.filter((r) => r !== rel) : [...prev, rel]));
+  const vaultRootName = vaultRoot ? (vaultRoot.split(/[/\\]/).pop() || vaultRoot) : null;
+
   const sidebarOpen = useSettingsStore((s) => s.sidebarOpen);
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
 
@@ -55,6 +72,21 @@ export const Sidebar: React.FC = () => {
 
   const [query, setQuery] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
+
+  // When the workspace search box has text, flatten vault hits instead of the tree.
+  const filteredVaultFiles = React.useMemo(() => {
+    if (!query.trim()) return null;
+    const q = query.toLowerCase();
+    const out: VaultTreeNode[] = [];
+    const walk = (nodes: VaultTreeNode[]) => {
+      for (const n of nodes) {
+        if (n.kind === 'file' && n.name.toLowerCase().includes(q)) out.push(n);
+        walk(n.children);
+      }
+    };
+    walk(vaultTree);
+    return out;
+  }, [vaultTree, query]);
 
   // Drag and drop state
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
@@ -678,6 +710,79 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
     );
   };
 
+  const renderVaultTree = (nodes: VaultTreeNode[]): React.ReactNode =>
+    nodes.map((node) => {
+      if (node.kind === 'dir') {
+        const collapsed = collapsedVaultRels.includes(node.rel);
+        return (
+          <React.Fragment key={`vault-dir-${node.rel}`}>
+            <div
+              onClick={() => toggleVaultDir(node.rel)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px',
+                padding: '5px 8px',
+                borderRadius: 'var(--as-radius-sm)',
+                fontSize: '13px',
+                color: 'var(--as-text)',
+                cursor: 'pointer',
+                userSelect: 'none',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--as-bg-hover)')}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+            >
+              {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+              <Folder size={14} style={{ color: 'var(--as-accent)', flexShrink: 0 }} />
+              <span style={{ fontWeight: 550, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {node.name}
+              </span>
+            </div>
+            {!collapsed && <div style={{ marginLeft: '12px' }}>{renderVaultTree(node.children)}</div>}
+          </React.Fragment>
+        );
+      }
+      const isOpen = node.path !== null && documents.some((d) => d.meta.filePath === node.path && !d.deletedAt);
+      const isActiveDoc =
+        node.path !== null && documents.some((d) => d.meta.filePath === node.path && d.id === activeId && !d.deletedAt);
+      return (
+        <div
+          key={`vault-file-${node.rel}`}
+          onClick={() => {
+            if (node.path) {
+              openVaultFile(node.path);
+              if (isCompact) toggleSidebar();
+            }
+          }}
+          title={node.rel}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '5px 8px',
+            borderRadius: 'var(--as-radius-sm)',
+            fontSize: '13px',
+            fontWeight: isActiveDoc ? 600 : 400,
+            color: isActiveDoc ? 'var(--as-text)' : 'var(--as-text-muted)',
+            backgroundColor: isActiveDoc ? 'var(--as-bg-subtle)' : 'transparent',
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+          onMouseEnter={(e) => {
+            if (!isActiveDoc) e.currentTarget.style.backgroundColor = 'var(--as-bg-hover)';
+          }}
+          onMouseLeave={(e) => {
+            if (!isActiveDoc) e.currentTarget.style.backgroundColor = 'transparent';
+          }}
+        >
+          <FileText size={14} style={{ opacity: isOpen ? 1 : 0.6, flexShrink: 0 }} />
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {formatDisplayName(node.name)}
+          </span>
+        </div>
+      );
+    });
+
   return (
     <>
       {/* Mobile/Compact Backdrop */}
@@ -908,6 +1013,40 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
             <span>Open File…</span>
           </button>
 
+          {isDesktop && (
+            <button
+              type="button"
+              onClick={() => openVault()}
+              title="Open a folder as a vault (disk-backed notes with autosave)"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                width: '100%',
+                padding: '6px 10px',
+                backgroundColor: 'transparent',
+                border: 'none',
+                borderRadius: 'var(--as-radius-sm)',
+                color: 'var(--as-text-muted)',
+                fontSize: '13px',
+                cursor: 'pointer',
+                textAlign: 'left',
+                transition: 'background var(--as-transition-fast)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = 'var(--as-bg-hover)';
+                e.currentTarget.style.color = 'var(--as-text)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+                e.currentTarget.style.color = 'var(--as-text-muted)';
+              }}
+            >
+              <Folder size={15} />
+              <span>{vaultRoot ? 'Switch Vault…' : 'Open Folder…'}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={handleLoadSampleSpec}
@@ -1119,6 +1258,85 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
             </>
           )}
         </div>
+
+        {/* Section: Disk Vault (desktop only) */}
+        {isDesktop && vaultRoot && (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '12px 14px 4px 14px',
+              }}
+            >
+              <span
+                title={vaultRoot}
+                style={{
+                  fontSize: '11px',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.06em',
+                  color: 'var(--as-text-dim)',
+                  fontWeight: 650,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {`Vault · ${vaultRootName} (${vaultEntries.filter((e) => e.kind === 'file').length})`}
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                <button
+                  type="button"
+                  title="Rescan vault folder"
+                  onClick={() => refreshVault()}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--as-text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--as-accent)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+                >
+                  <RefreshCw size={13} />
+                </button>
+                <button
+                  type="button"
+                  title="Close vault"
+                  onClick={() => closeVault()}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--as-text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--as-accent)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            </div>
+            <div style={{ maxHeight: '40%', overflowY: 'auto', padding: '4px 8px 8px 8px' }}>
+              {vaultTree.length === 0 ? (
+                <div style={{ padding: '8px', fontSize: '12px', color: 'var(--as-text-dim)', fontStyle: 'italic' }}>
+                  No markdown files in this folder.
+                </div>
+              ) : (
+                renderVaultTree(filteredVaultFiles ?? vaultTree)
+              )}
+            </div>
+          </>
+        )}
 
         {/* Bottom Sidebar Controls: Trash */}
         <div

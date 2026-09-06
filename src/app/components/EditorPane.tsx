@@ -2,12 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import { EditorView } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { createEditorExtensions, reconfigureEditorMode } from '../../editor/setup';
+import { dataUrlToAsset } from '../../ipc/vault';
 import { ViewMode } from '../../editor/modes/view-mode';
 import { useWorkspaceStore } from '../stores/workspace';
 import { useSettingsStore } from '../stores/settings';
 import { FloatingToolbar } from './FloatingToolbar';
 import { SlashCommandMenu } from './SlashCommandMenu';
 import { ImageModal } from './ImageModal';
+import { SyncBanner } from './SyncBanner';
 import { toggleInlineFormat, setHeadingLevel } from '../../editor/commands/formatting';
 import { openSearchPanel } from '@codemirror/search';
 import { Folder, FileText, Plus } from 'lucide-react';
@@ -420,12 +422,28 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
       from: view.state.selection.main.from,
       to: view.state.selection.main.to,
     };
-    const imageMd = title ? `![${alt}](${url} "${title}")\n` : `![${alt}](${url})\n`;
-    view.dispatch({
-      changes: { from: target.from, to: target.to, insert: imageMd },
-      selection: { anchor: target.from + imageMd.length },
-    });
-    view.focus();
+    const insert = (finalUrl: string) => {
+      const imageMd = title ? `![${alt}](${finalUrl} "${title}")\n` : `![${alt}](${finalUrl})\n`;
+      // Clamp: the asset write is async, the doc may have moved meanwhile.
+      const liveFrom = Math.min(target.from, view.state.doc.length);
+      const liveTo = Math.min(target.to, view.state.doc.length);
+      view.dispatch({
+        changes: { from: liveFrom, to: liveTo, insert: imageMd },
+        selection: { anchor: liveFrom + imageMd.length },
+      });
+      view.focus();
+    };
+    // Inline data URLs become vault assets when a vault is open (desktop);
+    // remote URLs and browser sessions keep the URL as-is.
+    const store = useWorkspaceStore.getState();
+    const activeDoc = store.documents.find((d) => d.id === store.activeDocumentId);
+    if (url.startsWith('data:image/') && activeDoc?.meta.filePath && store.vaultRoot) {
+      void dataUrlToAsset(url, activeDoc.meta.fileName, store.vaultRoot)
+        .then((rel) => insert(rel ?? url))
+        .catch(() => insert(url));
+    } else {
+      insert(url);
+    }
     setImageModalOpen(false);
     setImageTargetRange(null);
     setEditingImageData(null);
@@ -516,6 +534,9 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
           })}
         </nav>
       )}
+
+      {/* External-change reconciliation banner (vault conflicts / deletions) */}
+      <SyncBanner docId={activeDocId} />
 
       {/* Editor Container */}
       <div

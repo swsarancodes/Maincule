@@ -1,10 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
 
+export type LineEnding = 'lf' | 'crlf';
+
 export interface FileReadResult {
   text: string;
   path: string;
   hash: string;
   mtime: number;
+  line_ending: LineEnding;
+  has_bom: boolean;
+  final_newline: boolean;
 }
 
 export interface FileWriteResult {

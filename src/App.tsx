@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { useSettingsStore } from './app/stores/settings';
+import { useWorkspaceStore } from './app/stores/workspace';
 import { Sidebar } from './app/components/Sidebar';
 import { TabBar } from './app/components/TabBar';
 import { EditorPane } from './app/components/EditorPane';
@@ -27,6 +28,15 @@ export const App: React.FC = () => {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
+
+  // A persisted vault root survives reloads; its entries don't — rescan once
+  // the store has rehydrated so the sidebar tree comes back on launch.
+  // startVaultSync also (re)arms the backend watcher for the restored root.
+  useEffect(() => {
+    const store = useWorkspaceStore.getState();
+    store.startVaultSync();
+    void store.refreshVault();
+  }, []);
 
   return (
     <div
