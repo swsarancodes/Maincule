@@ -13,6 +13,7 @@ export const TabBar: React.FC = () => {
   const closeDoc = useWorkspaceStore((s) => s.closeDocument);
   const createEmpty = useWorkspaceStore((s) => s.createEmptyDocument);
   const renameDoc = useWorkspaceStore((s) => s.renameDocument);
+  const reorderDocument = useWorkspaceStore((s) => s.reorderDocument);
 
   const mode = useSettingsStore((s) => s.mode);
   const setMode = useSettingsStore((s) => s.setMode);
@@ -25,8 +26,33 @@ export const TabBar: React.FC = () => {
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [editingName, setEditingName] = React.useState('');
   const [exportMenuOpen, setExportMenuOpen] = React.useState(false);
+  const [dragId, setDragId] = React.useState<string | null>(null);
+  const [dropHint, setDropHint] = React.useState<{ id: string; side: 'left' | 'right' } | null>(null);
   const exportRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+
+  // Visible (non-deleted) tabs, in display order
+  const visibleDocs = React.useMemo(() => documents.filter((doc) => !doc.deletedAt), [documents]);
+
+  const clearDragState = React.useCallback(() => {
+    setDragId(null);
+    setDropHint(null);
+  }, []);
+
+  // Keyboard reorder: Ctrl/Cmd + ArrowLeft/Right moves the focused tab
+  const handleTabKeyDown = (e: React.KeyboardEvent, docId: string) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      e.stopPropagation();
+      const idx = visibleDocs.findIndex((d) => d.id === docId);
+      if (idx === -1) return;
+      if (e.key === 'ArrowLeft' && idx > 0) {
+        reorderDocument(docId, visibleDocs[idx - 1].id, 'before');
+      } else if (e.key === 'ArrowRight' && idx < visibleDocs.length - 1) {
+        reorderDocument(docId, visibleDocs[idx + 1].id, 'after');
+      }
+    }
+  };
 
   // Close export dropdown when clicking outside
   React.useEffect(() => {
@@ -159,19 +185,67 @@ export const TabBar: React.FC = () => {
             flex: 1,
             minWidth: 0,
           }}
+          onDragOver={(e) => {
+            // Allow dropping on empty container space to move the tab to the end
+            if (dragId) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            if (!dragId) return;
+            e.preventDefault();
+            if ((e.target as HTMLElement).closest('.as-tab-item') === null) {
+              reorderDocument(dragId, null);
+            }
+            clearDragState();
+          }}
         >
-          {documents
-            .filter((doc) => !doc.deletedAt)
+          {visibleDocs
             .map((doc) => {
               const isActive = doc.id === activeId;
               const isEditing = doc.id === editingId;
+              const isDragging = doc.id === dragId;
+              const hint = dropHint && dropHint.id === doc.id && doc.id !== dragId ? dropHint.side : null;
 
               return (
                 <div
                   key={doc.id}
+                  draggable={!isEditing}
+                  tabIndex={0}
                   onClick={() => setActiveDoc(doc.id)}
+                  onKeyDown={(e) => handleTabKeyDown(e, doc.id)}
                   onDoubleClick={(e) => handleStartRename(doc.id, doc.meta.fileName, e)}
+                  onDragStart={(e) => {
+                    e.dataTransfer.effectAllowed = 'move';
+                    try {
+                      e.dataTransfer.setData('text/plain', doc.id);
+                    } catch {}
+                    setDragId(doc.id);
+                  }}
+                  onDragOver={(e) => {
+                    if (!dragId || dragId === doc.id) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const side = e.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
+                    setDropHint((prev) => (prev && prev.id === doc.id && prev.side === side ? prev : { id: doc.id, side }));
+                  }}
+                  onDragLeave={(e) => {
+                    // Only clear when actually leaving the tab, not entering a child
+                    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                      setDropHint((prev) => (prev && prev.id === doc.id ? null : prev));
+                    }
+                  }}
+                  onDrop={(e) => {
+                    if (!dragId || dragId === doc.id) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const side = e.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
+                    reorderDocument(dragId, doc.id, side === 'left' ? 'before' : 'after');
+                    clearDragState();
+                  }}
+                  onDragEnd={clearDragState}
                   className="as-tab-item"
+                  title={`${doc.meta.fileName} (Drag to reorder · Double-click to rename)`}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -182,7 +256,14 @@ export const TabBar: React.FC = () => {
                     fontWeight: isActive ? 600 : 400,
                     color: isActive ? 'var(--as-text)' : 'var(--as-text-muted)',
                     backgroundColor: isActive ? 'var(--as-bg-subtle)' : 'transparent',
-                    cursor: 'pointer',
+                    cursor: isDragging ? 'grabbing' : 'grab',
+                    opacity: isDragging ? 0.4 : 1,
+                    boxShadow: hint === 'left'
+                      ? 'inset 2px 0 0 var(--as-accent)'
+                      : hint === 'right'
+                        ? 'inset -2px 0 0 var(--as-accent)'
+                        : undefined,
+                    outline: 'none',
                     transition: 'all var(--as-transition-fast)',
                     flexShrink: 0,
                     whiteSpace: 'nowrap',
@@ -193,6 +274,12 @@ export const TabBar: React.FC = () => {
                     if (!isActive) e.currentTarget.style.backgroundColor = 'var(--as-bg-hover)';
                   }}
                   onMouseLeave={(e) => {
+                    if (!isActive) e.currentTarget.style.backgroundColor = 'transparent';
+                  }}
+                  onFocus={(e) => {
+                    if (!isActive) e.currentTarget.style.backgroundColor = 'var(--as-bg-hover)';
+                  }}
+                  onBlur={(e) => {
                     if (!isActive) e.currentTarget.style.backgroundColor = 'transparent';
                   }}
                 >
@@ -244,6 +331,19 @@ export const TabBar: React.FC = () => {
                     >
                       {formatDisplayName(doc.meta.fileName)}
                     </span>
+                  )}
+
+                  {doc.isDirty && (
+                    <span
+                      title="Unsaved changes"
+                      style={{
+                        width: '7px',
+                        height: '7px',
+                        borderRadius: '50%',
+                        backgroundColor: 'var(--as-accent)',
+                        flexShrink: 0,
+                      }}
+                    />
                   )}
 
                   {documents.length > 1 && (

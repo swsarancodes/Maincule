@@ -120,6 +120,7 @@ export interface WorkspaceState {
   emptyTrash: () => void;
   updateDocumentContent: (id: string, newContent: string) => void;
   renameDocument: (id: string, newName: string) => void;
+  reorderDocument: (fromId: string, toId: string | null, position?: 'before' | 'after') => void;
   markDocumentSaved: (id: string, newPath?: string) => void;
   updateCursorPosition: (line: number, col: number) => void;
   updateCursorStats: (line: number, col: number) => void;
@@ -542,8 +543,25 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         });
       },
 
-      updateDocumentContent: (id: string, newContent: string) => {
-        const words = computeWordCount(newContent);
+      reorderDocument: (fromId: string, toId: string | null, position: 'before' | 'after' = 'before') => {
+        if (toId !== null && fromId === toId) return;
+        set((state) => {
+          const fromIdx = state.documents.findIndex((d) => d.id === fromId);
+          if (fromIdx === -1) return state;
+          const next = [...state.documents];
+          const [moved] = next.splice(fromIdx, 1);
+          if (toId === null) {
+            next.push(moved);
+          } else {
+            const toIdx = next.findIndex((d) => d.id === toId);
+            if (toIdx === -1) return state;
+            next.splice(position === 'after' ? toIdx + 1 : toIdx, 0, moved);
+          }
+          return { documents: next };
+        });
+      },
+
+      updateDocumentContent: (id: string, newContent: string) => {        const words = computeWordCount(newContent);
         const headingTitle = extractDocumentHeading(newContent);
 
         set((state) => ({
