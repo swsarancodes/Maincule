@@ -14,38 +14,49 @@ export interface DocumentHeading {
 export function extractDocumentHeadings(markdown: string): DocumentHeading[] {
   if (!markdown) return [];
   const headings: DocumentHeading[] = [];
-  const lines = markdown.split(/\r?\n/);
   let inCodeBlock = false;
+  let inFrontmatter = false;
+  let lineIndex = 0;
   let charOffset = 0;
 
-  for (let i = 0; i < lines.length; i++) {
-    const lineText = lines[i];
+  // Iterate lines WITH their exact separators so `pos` stays correct for
+  // LF, CRLF, CR, and mixed line endings.
+  const lineRe = /([^\r\n]*)(\r\n|[\n\r]|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = lineRe.exec(markdown)) !== null) {
+    if (match[0] === '') break;
+    const lineText = match[1];
+    const sep = match[2];
     const trimmed = lineText.trim();
 
-    if (trimmed.startsWith('```')) {
+    // YAML frontmatter: only at the very start of the document.
+    if (lineIndex === 0 && trimmed === '---') {
+      inFrontmatter = true;
+    } else if (inFrontmatter) {
+      if (trimmed === '---' || trimmed === '...') inFrontmatter = false;
+    } else if (/^ {0,3}(`{3,}|~{3,})/.test(lineText)) {
       inCodeBlock = !inCodeBlock;
-      charOffset += lineText.length + 1;
-      continue;
-    }
-
-    if (!inCodeBlock) {
-      const match = lineText.match(/^(#{1,6})\s+([^\r\n]+)/);
-      if (match) {
-        const level = match[1].length;
-        const raw = match[2].trim();
+    } else if (!inCodeBlock) {
+      // ATX headings allow at most 3 leading spaces; 4+ is indented code.
+      const headingMatch = lineText.match(/^ {0,3}(#{1,6})\s+([^\r\n]+)/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        const raw = headingMatch[2].trim();
         const clean = raw.replace(/[*_~`]/g, '').trim();
         if (clean) {
           headings.push({
-            id: `heading-${i}-${charOffset}`,
+            id: `heading-${lineIndex}-${charOffset}`,
             level,
             text: clean,
-            line: i + 1,
+            line: lineIndex + 1,
             pos: charOffset,
           });
         }
       }
     }
-    charOffset += lineText.length + 1;
+
+    charOffset += lineText.length + sep.length;
+    lineIndex++;
   }
 
   return headings;
@@ -90,9 +101,17 @@ export const DocumentOutline: React.FC = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Scroll spy & cursor tracking observer
+  // Scroll spy & cursor tracking observer. Scoped to the active document's
+  // editor pane so split view (two .cm-scroller elements) follows the right one.
   React.useEffect(() => {
-    const scroller = typeof document !== 'undefined' ? document.querySelector('.cm-scroller') : null;
+    const scroller =
+      typeof document !== 'undefined'
+        ? (activeId &&
+            document.querySelector(
+              `.as-editor-container[data-doc-id="${activeId}"] .cm-scroller`
+            )) ||
+          document.querySelector('.cm-scroller')
+        : null;
     if (!scroller) {
       const active = findActiveHeading(headings, cursorLine);
       setActiveHeadingId(active ? active.id : null);
@@ -119,7 +138,7 @@ export const DocumentOutline: React.FC = () => {
     updateActive();
     scroller.addEventListener('scroll', updateActive, { passive: true });
     return () => scroller.removeEventListener('scroll', updateActive);
-  }, [headings, cursorLine]);
+  }, [headings, cursorLine, activeId]);
 
   if (!outlineOpen) return null;
 

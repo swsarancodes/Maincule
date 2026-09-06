@@ -164,11 +164,14 @@ export const SlashCommandMenu: React.FC<SlashMenuProps> = ({
         const newDocId = useWorkspaceStore.getState().activeDocumentId;
         const newDoc = useWorkspaceStore.getState().documents.find((d) => d.id === newDocId);
         const title = newDoc ? formatDisplayName(newDoc.meta.fileName) : 'Subpage';
+        // Wikilink format: the wikilink pill resolves it to the subpage by
+        // title on click (a raw (#id) anchor matches nothing and would open
+        // an external URL via the link handler).
         v.dispatch({
           changes: {
             from: r.from,
             to: r.to,
-            insert: `[📄 ${title}](#${newDocId})\n`,
+            insert: `[[${title}]]\n`,
           },
         });
       },

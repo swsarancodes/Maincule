@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { EditorView } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
-import { createEditorExtensions } from '../../editor/setup';
+import { createEditorExtensions, reconfigureEditorMode } from '../../editor/setup';
 import { ViewMode } from '../../editor/modes/view-mode';
 import { useWorkspaceStore } from '../stores/workspace';
 import { useSettingsStore } from '../stores/settings';
@@ -32,6 +32,13 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
   const typewriterMode = useSettingsStore((s) => s.typewriterMode);
   const focusMode = useSettingsStore((s) => s.focusMode);
   const effectiveMode = modeOverride || globalMode;
+
+  // Refs mirror the latest values for long-lived CodeMirror callbacks, so the
+  // view never needs to be recreated to pick up a mode/setting change.
+  const effectiveModeRef = useRef(effectiveMode);
+  effectiveModeRef.current = effectiveMode;
+  const activeDocIdRef = useRef(activeDocId);
+  activeDocIdRef.current = activeDocId;
 
   // Floating toolbar state (on text selection)
   const [floatingPos, setFloatingPos] = useState<{ top: number; left: number } | null>(null);
@@ -81,7 +88,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
       } else if (key === 'k' && !e.shiftKey && !e.altKey) {
         const view = viewRef.current;
         const sel = view.state.selection.main;
-        if (!sel.empty && effectiveMode !== 'source') {
+        if (!sel.empty && effectiveModeRef.current !== 'source') {
           e.preventDefault();
           e.stopPropagation();
           setLinkRequested(true);
@@ -135,7 +142,10 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
     };
   }, []);
 
-  // Initialize and update CodeMirror EditorView on activeDocId or effectiveMode change
+  // Initialize the CodeMirror EditorView. Re-created ONLY when the active
+  // document changes. Mode / typewriter / focus changes are applied live via
+  // compartments (see the reconfigure effect below) so undo history,
+  // selection, scroll position, and folds survive the toggle.
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -154,8 +164,9 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
       typewriterMode,
       focusMode,
       onDocChange: (newDoc) => {
-        if (activeDocId) {
-          updateContent(activeDocId, newDoc);
+        const id = activeDocIdRef.current;
+        if (id) {
+          updateContent(id, newDoc);
         }
       },
       onCursorChange: (line, col) => {
@@ -167,7 +178,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
         const sel = view.state.selection.main;
 
         // 1. Handle Floating Selection Toolbar
-        if (!sel.empty && sel.to > sel.from && effectiveMode !== 'source') {
+        if (!sel.empty && sel.to > sel.from && effectiveModeRef.current !== 'source') {
           const coords = view.coordsAtPos(sel.from);
           if (coords) {
             setFloatingPos({
@@ -180,7 +191,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
         }
 
         // 2. Handle Live Slash Command (/) & Notion-style '+' button on empty line
-        if (sel.empty && effectiveMode !== 'source') {
+        if (sel.empty && effectiveModeRef.current !== 'source') {
           const pos = sel.from;
           const lineObj = view.state.doc.lineAt(pos);
           const textBefore = lineObj.text.slice(0, pos - lineObj.from);
@@ -240,7 +251,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
       }
       const pos = sel.from;
       const lineObj = v.state.doc.lineAt(pos);
-      if (effectiveMode === 'source' || lineObj.text.trim() !== '') {
+      if (effectiveModeRef.current === 'source' || lineObj.text.trim() !== '') {
         setEmptyLinePlus(null);
         return;
       }
@@ -278,9 +289,29 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
       setEmptyLinePlus(null);
     };
 
-    // Keep emptyLinePlus correctly positioned during scroll or resize
+    // Recompute the floating toolbar anchor from the live selection, so it
+    // tracks the selected text while the editor scrolls underneath it.
+    const updateFloatingPos = () => {
+      const v = viewRef.current;
+      if (!v) return;
+      const sel = v.state.selection.main;
+      if (!sel.empty && sel.to > sel.from && effectiveModeRef.current !== 'source') {
+        const coords = v.coordsAtPos(sel.from);
+        if (coords) {
+          const top = Math.max(10, coords.top - 46);
+          const left = Math.max(10, coords.left);
+          setFloatingPos((prev) => (prev && prev.top === top && prev.left === left ? prev : { top, left }));
+        }
+      }
+    };
+
+    // Keep emptyLinePlus correctly positioned during scroll or resize,
+    // and keep the floating toolbar glued to the selection while scrolling.
     const handleScroll = () => {
-      requestAnimationFrame(updateEmptyPlusState);
+      requestAnimationFrame(() => {
+        updateEmptyPlusState();
+        updateFloatingPos();
+      });
     };
 
     const handleResize = () => {
@@ -299,7 +330,20 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
       view.destroy();
       viewRef.current = null;
     };
-  }, [activeDocId, effectiveMode, typewriterMode, focusMode]);
+  }, [activeDocId]);
+
+  // Live-apply mode / typewriter / focus changes without destroying the view.
+  // Dispatching compartment reconfigurations preserves the document, undo
+  // history, selection, scroll position, and folds.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    reconfigureEditorMode(view, {
+      mode: effectiveMode,
+      typewriterMode,
+      focusMode,
+    });
+  }, [effectiveMode, typewriterMode, focusMode]);
 
   // Compute Notion-style breadcrumb hierarchy
   const currentDoc = documents.find((d) => d.id === activeDocId);
@@ -476,6 +520,8 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
       {/* Editor Container */}
       <div
         ref={containerRef}
+        data-doc-id={activeDocId}
+        className="as-editor-container"
         style={{
           flex: 1,
           width: '100%',

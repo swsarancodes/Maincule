@@ -60,6 +60,13 @@ export const Sidebar: React.FC = () => {
   const [draggedItemId, setDraggedItemId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
+  // Folders can't be dropped onto documents (docs accept subpages, but a folder
+  // parented to a doc would vanish from the tree). The store rejects it too;
+  // this just keeps the drop highlight honest.
+  const draggedIsFolder = draggedItemId
+    ? folders.some((f) => f.id === draggedItemId)
+    : false;
+
   // Renaming state
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingType, setEditingType] = useState<'doc' | 'folder'>('doc');
@@ -452,7 +459,7 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
                   setDropTargetId(null);
                 }}
                 onDragOver={(e) => {
-                  if (draggedItemId && draggedItemId !== doc.id) {
+                  if (draggedItemId && draggedItemId !== doc.id && !draggedIsFolder) {
                     e.preventDefault();
                     e.stopPropagation();
                     setDropTargetId(doc.id);
@@ -465,7 +472,7 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
                 onDrop={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  if (draggedItemId && draggedItemId !== doc.id) {
+                  if (draggedItemId && draggedItemId !== doc.id && !draggedIsFolder) {
                     moveItem(draggedItemId, doc.id);
                   }
                   setDraggedItemId(null);

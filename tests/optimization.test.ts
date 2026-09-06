@@ -1,6 +1,6 @@
 import { expect, test, describe, beforeAll } from 'bun:test';
 import { GlobalWindow } from 'happy-dom';
-import { computeWordCount, computeReadingTime, useWorkspaceStore } from '../src/app/stores/workspace';
+import { computeWordCount, computeReadingTime, useWorkspaceStore, flushPendingAutoRename } from '../src/app/stores/workspace';
 import { parseMarkdownTable, serializeMarkdownTable } from '../src/editor/widgets/table';
 import { findInlineSpans } from '../src/editor/decorations/delimiter-guard';
 import { formatDisplayName } from '../src/core/document/file-meta';
@@ -173,21 +173,23 @@ describe('File Display Name & Rename Sanitization', () => {
 
   test('changing heading inside page reflects back in sidebar document fileName', () => {
     const store = useWorkspaceStore.getState();
-    store.createEmptyDocument('Untitled-1.md');
+    store.createEmptyDocument();
     const docId = useWorkspaceStore.getState().activeDocumentId!;
+    const initialName = useWorkspaceStore.getState().documents.find((d) => d.id === docId)!.meta.fileName;
 
-    // Initially fileName is Untitled-1.md
-    expect(useWorkspaceStore.getState().documents.find((d) => d.id === docId)?.meta.fileName).toBe('Untitled-1.md');
-
-    // User types '# Sprint Planning' inside the page
+    // User types '# Sprint Planning' inside the page — the tab label settles
+    // after a pause (debounced), not mid-keystroke.
     store.updateDocumentContent(docId, '# Sprint Planning\n\n- Task 1\n- Task 2');
+    expect(useWorkspaceStore.getState().documents.find((d) => d.id === docId)?.meta.fileName).toBe(initialName);
 
+    flushPendingAutoRename();
     const updatedDoc = useWorkspaceStore.getState().documents.find((d) => d.id === docId);
     expect(updatedDoc?.meta.fileName).toBe('Sprint Planning.md');
     expect(formatDisplayName(updatedDoc!.meta.fileName)).toBe('Sprint Planning');
 
     // Editing body content without changing heading preserves fileName
     store.updateDocumentContent(docId, '# Sprint Planning\n\n- Task 1\n- Task 2\n- Task 3');
+    flushPendingAutoRename();
     expect(useWorkspaceStore.getState().documents.find((d) => d.id === docId)?.meta.fileName).toBe('Sprint Planning.md');
   });
 

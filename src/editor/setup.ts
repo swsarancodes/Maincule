@@ -1,4 +1,4 @@
-import { EditorState, Extension, Prec, RangeSetBuilder } from '@codemirror/state';
+import { EditorState, Extension, Prec, RangeSetBuilder, Compartment } from '@codemirror/state';
 import { EditorView, keymap, drawSelection, dropCursor, ViewPlugin, ViewUpdate, Decoration, DecorationSet } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { syntaxTree, codeFolding, foldGutter, foldKeymap } from '@codemirror/language';
@@ -359,11 +359,48 @@ export function focusModeExtension(mode: 'off' | 'sentence' | 'paragraph' = 'off
   );
 }
 
+/**
+ * Reconfigurable compartments.
+ *
+ * Mode / typewriter / focus changes must NOT destroy the EditorView (that wipes
+ * undo history, selection, scroll, and folds). These compartments let callers
+ * swap those extensions live via `reconfigureEditorMode(view, ...)`.
+ *
+ * Compartment instances are shared across views on purpose: reconfiguration is
+ * dispatched per-view, so split-view panes stay independent.
+ */
+export const modeCompartment = new Compartment();
+export const typewriterCompartment = new Compartment();
+export const focusCompartment = new Compartment();
+
+export interface ModeConfig {
+  mode?: ViewMode;
+  typewriterMode?: boolean;
+  focusMode?: 'off' | 'sentence' | 'paragraph';
+}
+
+function modeExtensionsFor(mode: ViewMode): Extension[] {
+  return [...(mode === 'source' ? [foldGutter()] : []), ...getModeExtensions(mode)];
+}
+
+/**
+ * Live-swap mode/typewriter/focus extensions on an existing view.
+ * Preserves document, undo history, selection, scroll position, and folds.
+ */
+export function reconfigureEditorMode(view: EditorView, config: ModeConfig): void {
+  view.dispatch({
+    effects: [
+      modeCompartment.reconfigure(modeExtensionsFor(config.mode || 'hybrid')),
+      typewriterCompartment.reconfigure(typewriterExtension(config.typewriterMode)),
+      focusCompartment.reconfigure(focusModeExtension(config.focusMode)),
+    ],
+  });
+}
+
 export function createEditorExtensions(options: EditorSetupOptions = {}): Extension[] {
   const mode = options.mode || 'hybrid';
 
-  const updateListener = EditorView.updateListener.of((update) => {
-    if (update.docChanged && options.onDocChange) {
+  const updateListener = EditorView.updateListener.of((update) => {    if (update.docChanged && options.onDocChange) {
       options.onDocChange(update.state.doc.toString());
     }
 
@@ -378,13 +415,12 @@ export function createEditorExtensions(options: EditorSetupOptions = {}): Extens
 
   return [
     codeFolding(),
-    ...(mode === 'source' ? [foldGutter()] : []),
     history(),
     drawSelection(),
     lineSelectionExtension(),
     dropCursor(),
     createMarkdownExtension(),
-    ...getModeExtensions(mode),
+    modeCompartment.of(modeExtensionsFor(mode)),
     delimiterGuard(),
     imagePasteDropExtension(),
     smartPasteLinkExtension(),
@@ -396,8 +432,8 @@ export function createEditorExtensions(options: EditorSetupOptions = {}): Extens
     }),
     highlightSelectionMatches(),
     closeBrackets(),
-    typewriterExtension(options.typewriterMode),
-    focusModeExtension(options.focusMode),
+    typewriterCompartment.of(typewriterExtension(options.typewriterMode)),
+    focusCompartment.of(focusModeExtension(options.focusMode)),
     updateListener,
     Prec.highest(keymap.of(markdownFormattingKeymap)),
     keymap.of([

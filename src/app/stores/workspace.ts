@@ -128,6 +128,7 @@ export interface WorkspaceState {
 
 const initialDoc = createDocumentState(WELCOME_DOC, null);
 initialDoc.meta.fileName = 'Welcome.md';
+initialDoc.hasCustomName = true;
 
 function getDescendantDocIds(parentDocId: string, documents: DocumentState[]): Set<string> {
   const result = new Set<string>();
@@ -143,8 +144,7 @@ function getDescendantDocIds(parentDocId: string, documents: DocumentState[]): S
   return result;
 }
 
-function getDescendantFolderIds(parentFolderId: string, folders: FolderItem[]): Set<string> {
-  const result = new Set<string>();
+function getDescendantFolderIds(parentFolderId: string, folders: FolderItem[]): Set<string> {  const result = new Set<string>();
   function recurse(id: string) {
     for (const f of folders) {
       if (f.parentId === id && !result.has(f.id)) {
@@ -155,6 +155,89 @@ function getDescendantFolderIds(parentFolderId: string, folders: FolderItem[]): 
   }
   recurse(parentFolderId);
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Heading auto-rename (debounced)
+//
+// Typing a first heading renames Untitled-N.md to match — but only while the
+// doc was never explicitly named, only after the user pauses typing, and never
+// to a name another doc already has. This keeps tab labels stable per keystroke
+// and stops the rename from fighting explicit renames.
+// ---------------------------------------------------------------------------
+
+const AUTO_RENAME_DELAY_MS = 500;
+let autoRenameTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingAutoRenameIds = new Set<string>();
+
+function scheduleAutoRename(id: string): void {
+  pendingAutoRenameIds.add(id);
+  if (autoRenameTimer) clearTimeout(autoRenameTimer);
+  autoRenameTimer = setTimeout(() => {
+    autoRenameTimer = null;
+    const ids = [...pendingAutoRenameIds];
+    pendingAutoRenameIds.clear();
+    for (const targetId of ids) applyAutoRename(targetId);
+  }, AUTO_RENAME_DELAY_MS);
+}
+
+/** Test hook: run any pending auto-renames synchronously instead of on a timer. */
+export function flushPendingAutoRename(): void {
+  if (autoRenameTimer) {
+    clearTimeout(autoRenameTimer);
+    autoRenameTimer = null;
+  }
+  const ids = [...pendingAutoRenameIds];
+  pendingAutoRenameIds.clear();
+  for (const targetId of ids) applyAutoRename(targetId);
+}
+
+function applyAutoRename(id: string): void {
+  const state = useWorkspaceStore.getState();
+  const doc = state.documents.find((d) => d.id === id);
+  if (!doc || doc.deletedAt || doc.hasCustomName) return;
+
+  const headingTitle = extractDocumentHeading(doc.currentText);
+  if (!headingTitle) return;
+  const sanitized = headingTitle.replace(/[/\\?%*:|"<>]/g, '-').trim();
+  if (!sanitized) return;
+
+  const hadMd = doc.meta.fileName.toLowerCase().endsWith('.md');
+  const base = hadMd ? `${sanitized}.md` : sanitized;
+  if (base.toLowerCase() === doc.meta.fileName.toLowerCase()) return;
+
+  // Never steal another live doc's name — append " - 2", " - 3", ...
+  const taken = new Set(
+    state.documents
+      .filter((d) => d.id !== id && !d.deletedAt)
+      .map((d) => d.meta.fileName.toLowerCase())
+  );
+  let candidate = base;
+  if (taken.has(candidate.toLowerCase())) {
+    const dot = base.lastIndexOf('.');
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const ext = dot > 0 ? base.slice(dot) : '';
+    let n = 2;
+    while (taken.has(`${stem} - ${n}${ext}`.toLowerCase())) n++;
+    candidate = `${stem} - ${n}${ext}`;
+  }
+
+  useWorkspaceStore.setState((s) => ({
+    documents: s.documents.map((d) => {
+      if (d.id !== id) return d;
+      let newFilePath = d.meta.filePath;
+      if (d.meta.filePath) {
+        const parts = d.meta.filePath.split(/[/\\]/);
+        if (parts.length > 1) {
+          parts[parts.length - 1] = candidate;
+          newFilePath = parts.join('/');
+        } else {
+          newFilePath = candidate;
+        }
+      }
+      return { ...d, meta: { ...d.meta, fileName: candidate, filePath: newFilePath } };
+    }),
+  }));
 }
 
 export const useWorkspaceStore = create<WorkspaceState>()(
@@ -189,6 +272,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           const initialContent = `# ${displayName}\n\n`;
           const newDoc = createDocumentState(initialContent, null, parentId);
           newDoc.meta.fileName = fileName;
+          // An explicitly titled doc is already named; a generated
+          // Untitled-N.md may still be auto-renamed from its first heading.
+          newDoc.hasCustomName = !!title?.trim();
 
           const nextCollapsed = parentId
             ? state.collapsedIds.filter((cid) => cid !== parentId)
@@ -314,6 +400,11 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             if (newParentId === itemId || (newParentId && descendants.has(newParentId))) {
               return state;
             }
+            // Folders may only live at the root or inside other folders —
+            // never under a document (which would orphan them from the tree).
+            if (newParentId !== null && !state.folders.some((f) => f.id === newParentId)) {
+              return state;
+            }
             return {
               folders: state.folders.map((f) =>
                 f.id === itemId ? { ...f, parentId: newParentId } : f
@@ -340,6 +431,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       openDocument: (content: string, filePath = null) => {
         const doc = createDocumentState(content, filePath);
+        // A doc opened from disk already has a real name.
+        doc.hasCustomName = filePath ? true : doc.hasCustomName;
         set((state) => {
           const existing = state.documents.find((d) => d.meta.filePath === filePath && filePath !== null);
           if (existing) {
@@ -524,6 +617,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
                 ...doc,
                 currentText: updatedText,
                 isDirty: doc.isDirty || updatedText !== doc.initialText,
+                hasCustomName: true,
                 meta: {
                   ...doc.meta,
                   fileName: finalName,
@@ -561,42 +655,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         });
       },
 
-      updateDocumentContent: (id: string, newContent: string) => {        const words = computeWordCount(newContent);
-        const headingTitle = extractDocumentHeading(newContent);
+      updateDocumentContent: (id: string, newContent: string) => {
+        const words = computeWordCount(newContent);
 
         set((state) => ({
           documents: state.documents.map((doc) => {
             if (doc.id === id) {
-              const isDirty = newContent !== doc.initialText;
-              let meta = doc.meta;
-
-              if (headingTitle) {
-                const sanitized = headingTitle.replace(/[/\\?%*:|"<>]/g, '-').trim();
-                if (sanitized) {
-                  const hadMd = doc.meta.fileName.toLowerCase().endsWith('.md');
-                  const newFileName = hadMd ? `${sanitized}.md` : sanitized;
-
-                  if (newFileName !== doc.meta.fileName) {
-                    let newFilePath = doc.meta.filePath;
-                    if (doc.meta.filePath) {
-                      const parts = doc.meta.filePath.split(/[/\\]/);
-                      if (parts.length > 1) {
-                        parts[parts.length - 1] = newFileName;
-                        newFilePath = parts.join('/');
-                      } else {
-                        newFilePath = newFileName;
-                      }
-                    }
-                    meta = {
-                      ...doc.meta,
-                      fileName: newFileName,
-                      filePath: newFilePath,
-                    };
-                  }
-                }
-              }
-
-              return { ...doc, currentText: newContent, isDirty, meta };
+              return { ...doc, currentText: newContent, isDirty: newContent !== doc.initialText };
             }
             return doc;
           }),
@@ -604,6 +669,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           charCount: newContent.length,
           readingTimeMin: computeReadingTime(words),
         }));
+
+        // Heading auto-rename is debounced (see scheduleAutoRename): the text
+        // lands immediately, the tab label settles after the user pauses typing.
+        scheduleAutoRename(id);
       },
 
       markDocumentSaved: (id: string, newPath?: string) => {
@@ -614,6 +683,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
                 ...doc,
                 initialText: doc.currentText,
                 isDirty: false,
+                hasCustomName: newPath ? true : doc.hasCustomName,
                 meta: {
                   ...doc.meta,
                   filePath: newPath || doc.meta.filePath,
