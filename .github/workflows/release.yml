@@ -55,8 +55,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'Manicule v__VERSION__'
+          tagName: v0.6.0
+          releaseName: 'Manicule v0.6.0'
           releaseBody: |
             ### Manicule ☞ — Distraction-Free Markdown Studio
 
