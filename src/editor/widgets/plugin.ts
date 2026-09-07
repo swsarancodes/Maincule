@@ -7,11 +7,26 @@ import { CodeBlockWidget } from './code-block';
 import { CalloutWidget } from './callout';
 import { HRWidget } from './hr';
 import { ImageWidget } from './image';
+import { FrontmatterWidget } from './frontmatter';
+import { detectFrontmatter } from '../../core/markdown/frontmatter';
 
 export function buildBlockWidgets(state: EditorState): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const doc = state.doc;
   const decos: Array<{ from: number; to: number; deco: Decoration }> = [];
+
+  // Front matter is offset-based (Lezer only tags YAML): it owns [0, to).
+  // Every Lezer node inside that range is skipped below so a `---` fence
+  // never double-renders as a horizontal rule inside the panel.
+  const fm = detectFrontmatter(doc.length > 8192 ? doc.sliceString(0, 8192) : doc.toString());
+  if (fm) {
+    decos.push({
+      from: fm.from,
+      to: Math.min(fm.to, doc.length),
+      deco: Decoration.replace({ widget: new FrontmatterWidget(doc.sliceString(fm.from, Math.min(fm.to, doc.length)), fm.from, Math.min(fm.to, doc.length)), block: true }),
+    });
+  }
+  const fmTo = fm ? Math.min(fm.to, doc.length) : 0;
 
   syntaxTree(state).iterate({
     from: 0,
@@ -20,6 +35,9 @@ export function buildBlockWidgets(state: EditorState): DecorationSet {
       const name = node.name;
       const nodeFrom = node.from;
       const nodeTo = node.to;
+
+      // Front-matter range is owned by the panel above — never decorate inside.
+      if (fmTo > 0 && nodeFrom < fmTo) return false;
 
       // 1. Tables: Always render interactive Notion-style table widget
       if (name === 'Table') {

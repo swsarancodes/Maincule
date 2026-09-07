@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { useWorkspaceStore } from '../stores/workspace';
 import { useSettingsStore } from '../stores/settings';
+import { frontmatterEnd } from '../../core/markdown/frontmatter';
 import { ListTree, X, FileText, Clock, Hash } from 'lucide-react';
 
 export interface DocumentHeading {
@@ -14,8 +15,10 @@ export interface DocumentHeading {
 export function extractDocumentHeadings(markdown: string): DocumentHeading[] {
   if (!markdown) return [];
   const headings: DocumentHeading[] = [];
+  // Front matter (YAML ---, TOML +++, JSON {...}) occupies the first block
+  // only — skip it by offset so body `---` fences are never swallowed.
+  const fmEnd = frontmatterEnd(markdown);
   let inCodeBlock = false;
-  let inFrontmatter = false;
   let lineIndex = 0;
   let charOffset = 0;
 
@@ -27,14 +30,15 @@ export function extractDocumentHeadings(markdown: string): DocumentHeading[] {
     if (match[0] === '') break;
     const lineText = match[1];
     const sep = match[2];
-    const trimmed = lineText.trim();
 
-    // YAML frontmatter: only at the very start of the document.
-    if (lineIndex === 0 && trimmed === '---') {
-      inFrontmatter = true;
-    } else if (inFrontmatter) {
-      if (trimmed === '---' || trimmed === '...') inFrontmatter = false;
-    } else if (/^ {0,3}(`{3,}|~{3,})/.test(lineText)) {
+    // Skip the front-matter block by offset (first block only).
+    if (charOffset < fmEnd) {
+      charOffset += lineText.length + sep.length;
+      lineIndex++;
+      continue;
+    }
+
+    if (/^ {0,3}(`{3,}|~{3,})/.test(lineText)) {
       inCodeBlock = !inCodeBlock;
     } else if (!inCodeBlock) {
       // ATX headings allow at most 3 leading spaces; 4+ is indented code.

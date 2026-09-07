@@ -1,5 +1,6 @@
 import { FileMeta, detectFileMeta } from './file-meta';
 import { serializeDocument } from './serialize';
+import { frontmatterEnd } from '../markdown/frontmatter';
 
 export interface FolderItem {
   id: string;
@@ -91,10 +92,10 @@ export function syncDocumentHeading(text: string, title: string): string {
     return `${headingLine}\n\n`;
   }
 
-  // Check frontmatter
-  const frontmatterMatch = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)*/);
-  const fm = frontmatterMatch ? frontmatterMatch[0] : '';
-  const body = frontmatterMatch ? text.slice(fm.length) : text;
+  // Check frontmatter (YAML ---, TOML +++, or JSON {...} — first block only)
+  const fmEnd = frontmatterEnd(text);
+  const fm = text.slice(0, fmEnd);
+  const body = text.slice(fmEnd);
 
   // Find the first non-empty line in body
   const lines = body.split(/\r?\n/);
@@ -122,9 +123,8 @@ export function syncDocumentHeading(text: string, title: string): string {
 export function extractDocumentHeading(text: string): string | null {
   if (!text.trim()) return null;
 
-  // Check frontmatter
-  const frontmatterMatch = text.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)*/);
-  const body = frontmatterMatch ? text.slice(frontmatterMatch[0].length) : text;
+  // Skip frontmatter (YAML ---, TOML +++, or JSON {...} — first block only)
+  const body = text.slice(frontmatterEnd(text));
 
   // 1. Look for explicit H1 heading anywhere near the top: # Heading
   const h1Match = body.match(/^#\s+([^\r\n]+)/m);
