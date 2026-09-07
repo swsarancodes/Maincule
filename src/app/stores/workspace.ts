@@ -17,6 +17,7 @@ import {
   openVaultDialog,
   setVaultRoot,
   listVaultFiles,
+  deleteVaultPath,
   startVaultWatch,
   stopVaultWatch,
 } from '../../ipc/vault';
@@ -171,6 +172,8 @@ export interface WorkspaceState {
   openVault: () => Promise<void>;
   refreshVault: () => Promise<void>;
   openVaultFile: (path: string) => Promise<void>;
+  /** Move a vault file/dir to the OS Trash; closes affected tabs. */
+  deleteVaultFile: (path: string) => Promise<void>;
   closeVault: () => void;
   /** Subscribe to backend watcher events (idempotent; desktop only). */
   startVaultSync: () => void;
@@ -1046,6 +1049,35 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           stopVaultWatch().catch(() => {});
         }
         set({ vaultRoot: null, vaultEntries: [] });
+      },
+
+      deleteVaultFile: async (path: string) => {
+        if (!isTauriEnvironment()) return;
+        await deleteVaultPath(path);
+        // Close tabs for the trashed path (and, for dirs, everything under
+        // it) through the existing soft-delete, so TrashModal keeps working
+        // for the tab. The watcher echo then only resnapshots the tree.
+        const norm = (p: string) => p.replace(/\\/g, '/');
+        const prefix = `${norm(path)}/`;
+        const affected = get().documents.filter(
+          (d) =>
+            !d.deletedAt &&
+            d.meta.filePath &&
+            (d.meta.filePath === path || norm(d.meta.filePath).startsWith(prefix))
+        );
+        for (const doc of affected) get().deleteDocument(doc.id);
+        set((s) => {
+          const dropped = new Set(affected.map((d) => d.id));
+          const viewState = { ...s.docViewState };
+          for (const id of dropped) delete viewState[id];
+          return {
+            recentPaths: s.recentPaths.filter(
+              (p) => p !== path && !norm(p).startsWith(prefix)
+            ),
+            docViewState: viewState,
+          };
+        });
+        await get().refreshVault();
       },
 
       startVaultSync: () => {

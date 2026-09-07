@@ -362,6 +362,46 @@ pub fn read_vault_dir(state: tauri::State<VaultState>) -> Result<Vec<VaultEntry>
     scan_vault_dir(&root)
 }
 
+/// Move a vault file or directory to the OS Trash/Recycle Bin. Scoped to the
+/// vault root via `resolve_in_vault`; symlinks are never followed (the scan
+/// never surfaces them, so a request for one is rejected). Returns the
+/// trashed entry's display name for the frontend confirmation.
+fn move_to_trash(root: &Path, requested: &str) -> Result<String, String> {
+    let target = resolve_in_vault(root, requested)?;
+    if target == *root {
+        return Err("Refusing to trash the vault root itself".to_string());
+    }
+    if target.is_symlink() {
+        return Err(format!(
+            "Refusing to trash a symlink: {}",
+            Path::new(requested).display()
+        ));
+    }
+    if !target.exists() {
+        return Err(format!("Not found: {}", Path::new(requested).display()));
+    }
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    trash::delete(&target).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
+#[tauri::command]
+pub fn delete_to_trash(
+    state: tauri::State<VaultState>,
+    path: String,
+) -> Result<String, String> {
+    let root = state
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "No vault open. Open a folder first.".to_string())?;
+    move_to_trash(&root, &path)
+}
+
 // ---------------------------------------------------------------------------
 // Live watcher: forwards vault file events to the frontend (`vault://file-changed`).
 // The frontend debounces per path, skips our own saves, and reconciles.
@@ -616,6 +656,51 @@ mod tests {    use super::*;
         assert!(dirs.contains(&"notes"));
         assert!(dirs.contains(&"notes/sub"));
         assert!(!dirs.iter().any(|d| d.contains(".git")));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trash_moves_file_out_of_vault() {
+        let dir = unique_dir("trash_file");
+        fs::write(dir.join("gone.md"), b"# gone").unwrap();
+        fs::write(dir.join("kept.md"), b"# kept").unwrap();
+
+        let name = move_to_trash(&dir, "gone.md").expect("trash file");
+        assert_eq!(name, "gone.md");
+        assert!(!dir.join("gone.md").exists());
+        assert!(dir.join("kept.md").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trash_moves_directory_recursively() {
+        let dir = unique_dir("trash_dir");
+        fs::create_dir_all(dir.join("notes/sub")).unwrap();
+        fs::write(dir.join("notes/a.md"), b"# a").unwrap();
+
+        let name = move_to_trash(&dir, "notes").expect("trash dir");
+        assert_eq!(name, "notes");
+        assert!(!dir.join("notes").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn trash_rejects_escape_root_and_missing() {
+        let dir = unique_dir("trash_scope");
+        fs::write(dir.join("a.md"), b"# a").unwrap();
+
+        assert!(move_to_trash(&dir, "../etc/passwd").is_err());
+        assert!(move_to_trash(&dir, "a/../../etc/passwd").is_err());
+        assert!(move_to_trash(&dir, "/etc/passwd").is_err());
+        assert!(move_to_trash(&dir, "nope.md").is_err());
+        // The vault root itself is never trashable.
+        assert!(move_to_trash(&dir, ".").is_err());
+
+        // Rejected trashes leave the vault untouched.
+        assert!(dir.join("a.md").exists());
 
         fs::remove_dir_all(&dir).ok();
     }

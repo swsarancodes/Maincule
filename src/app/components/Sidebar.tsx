@@ -46,6 +46,7 @@ export const Sidebar: React.FC = () => {
   const openVault = useWorkspaceStore((s) => s.openVault);
   const refreshVault = useWorkspaceStore((s) => s.refreshVault);
   const openVaultFile = useWorkspaceStore((s) => s.openVaultFile);
+  const deleteVaultFile = useWorkspaceStore((s) => s.deleteVaultFile);
   const closeVault = useWorkspaceStore((s) => s.closeVault);
 
   const isDesktop = isTauriEnvironment();
@@ -54,6 +55,28 @@ export const Sidebar: React.FC = () => {
   const toggleVaultDir = (rel: string) =>
     setCollapsedVaultRels((prev) => (prev.includes(rel) ? prev.filter((r) => r !== rel) : [...prev, rel]));
   const vaultRootName = vaultRoot ? (vaultRoot.split(/[/\\]/).pop() || vaultRoot) : null;
+
+  // Vault delete: confirm natively, then move to the OS Trash via Rust.
+  // Dynamically imported so the browser build never touches Tauri plugins.
+  const handleVaultDelete = React.useCallback(
+    async (node: VaultTreeNode, e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!node.path) return;
+      try {
+        const { confirm } = await import('@tauri-apps/plugin-dialog');
+        const what = node.kind === 'dir' ? `folder "${node.name}" and its contents` : `"${node.name}"`;
+        const ok = await confirm(`Move ${what} to Trash?`, {
+          title: 'Delete from vault',
+          kind: 'warning',
+        });
+        if (!ok) return;
+        await deleteVaultFile(node.path);
+      } catch (err) {
+        console.warn('Vault delete failed:', err);
+      }
+    },
+    [deleteVaultFile]
+  );
 
   const sidebarOpen = useSettingsStore((s) => s.sidebarOpen);
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
@@ -717,6 +740,7 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
         return (
           <React.Fragment key={`vault-dir-${node.rel}`}>
             <div
+              className="as-tree-node"
               onClick={() => toggleVaultDir(node.rel)}
               style={{
                 display: 'flex',
@@ -737,6 +761,36 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
               <span style={{ fontWeight: 550, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {node.name}
               </span>
+              <div
+                className="as-tree-actions"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  marginLeft: 'auto',
+                  opacity: 0,
+                  transition: 'opacity var(--as-transition-fast)',
+                }}
+              >
+                <button
+                  type="button"
+                  title="Delete Folder"
+                  onClick={(e) => void handleVaultDelete(node, e)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--as-text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = '#ef4444')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+                >
+                  <Trash2 size={11} />
+                </button>
+              </div>
             </div>
             {!collapsed && <div style={{ marginLeft: '12px' }}>{renderVaultTree(node.children)}</div>}
           </React.Fragment>
@@ -748,6 +802,7 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
       return (
         <div
           key={`vault-file-${node.rel}`}
+          className="as-tree-node"
           onClick={() => {
             if (node.path) {
               openVaultFile(node.path);
@@ -779,6 +834,35 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {formatDisplayName(node.name)}
           </span>
+          <div
+            className="as-tree-actions"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              opacity: 0,
+              transition: 'opacity var(--as-transition-fast)',
+            }}
+          >
+            <button
+              type="button"
+              title="Delete Note"
+              onClick={(e) => void handleVaultDelete(node, e)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--as-text-dim)',
+                cursor: 'pointer',
+                padding: '2px',
+                borderRadius: '3px',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = '#ef4444')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+            >
+              <Trash2 size={11} />
+            </button>
+          </div>
         </div>
       );
     });

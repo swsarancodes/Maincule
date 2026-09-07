@@ -8,6 +8,7 @@ import {
   resolveImageSrc,
   hasDiskHash,
   saveDocToDisk,
+  deleteVaultPath,
   storeImageBytes,
   dataUrlToAsset,
   type VaultEntry,
@@ -124,6 +125,17 @@ describe('Session restore', () => {
     const docId = useWorkspaceStore.getState().activeDocumentId!;
     store.markDocumentSaved(docId, '/tmp/session-saved.md');
     expect(useWorkspaceStore.getState().recentPaths[0]).toBe('/tmp/session-saved.md');
+  });
+});
+describe('Vault delete guards (browser build)', () => {
+  test('deleteVaultPath refuses to run outside the desktop shell', async () => {
+    await expect(deleteVaultPath('/v/notes/a.md')).rejects.toThrow('desktop shell');
+  });
+
+  test('deleteVaultFile no-ops in the browser without touching tabs', async () => {
+    const before = useWorkspaceStore.getState().documents.length;
+    await useWorkspaceStore.getState().deleteVaultFile('/v/notes/a.md');
+    expect(useWorkspaceStore.getState().documents.length).toBe(before);
   });
 });
 describe('Disk guards (browser build)', () => {

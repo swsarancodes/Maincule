@@ -117,6 +117,16 @@ export async function listVaultFiles(): Promise<VaultEntry[]> {
   return invoke<VaultEntry[]>('read_vault_dir');
 }
 
+/**
+ * Move a vault file or directory to the OS Trash. Returns the trashed
+ * entry's display name. Desktop only — rejects outside the browser shell
+ * just like the disk-write guards below.
+ */
+export async function deleteVaultPath(path: string): Promise<string> {
+  if (!isTauriEnvironment()) throw new Error('Vault delete needs the desktop shell');
+  return invoke<string>('delete_to_trash', { path });
+}
+
 export interface VaultChangeEvent {
   /** Absolute path that changed. */
   path: string;

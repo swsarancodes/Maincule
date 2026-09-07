@@ -24,6 +24,7 @@ pub fn run() {
             commands::fs::write_binary_atomic,
             commands::fs::set_vault_root,
             commands::fs::read_vault_dir,
+            commands::fs::delete_to_trash,
             commands::fs::start_vault_watch,
             commands::fs::stop_vault_watch,
         ])
