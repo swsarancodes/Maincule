@@ -32,10 +32,15 @@ export const App: React.FC = () => {
   // A persisted vault root survives reloads; its entries don't — rescan once
   // the store has rehydrated so the sidebar tree comes back on launch.
   // startVaultSync also (re)arms the backend watcher for the restored root.
+  // rehydrateVaultDocs then reconciles each reopened tab against disk:
+  // clean tabs silently adopt external edits, dirty tabs raise the banner.
   useEffect(() => {
     const store = useWorkspaceStore.getState();
     store.startVaultSync();
-    void store.refreshVault();
+    void (async () => {
+      await store.refreshVault();
+      await store.rehydrateVaultDocs();
+    })();
   }, []);
 
   return (

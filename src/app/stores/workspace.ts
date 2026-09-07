@@ -82,6 +82,14 @@ flowchart TD
 * **Nested Folders & Subpages**: Complete Notion-style organization.
 `;
 
+const STORAGE_WRITE_DELAY_MS = 500;
+const pendingStorageWrites = new Map<string, ReturnType<typeof setTimeout>>();
+
+export function flushPendingStorageWrites(): void {
+  for (const [, timer] of pendingStorageWrites) clearTimeout(timer);
+  pendingStorageWrites.clear();
+}
+
 const safeStorage: StateStorage = {
   getItem: (name: string): string | null => {
     try {
@@ -93,9 +101,21 @@ const safeStorage: StateStorage = {
   },
   setItem: (name: string, value: string): void => {
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(name, value);
-      }
+      if (typeof window === 'undefined' || !window.localStorage) return;
+      // Zustand persist calls setItem on every store set — including every
+      // cursor move. Debounce the actual localStorage write so typing and
+      // caret motion never block on synchronous JSON serialization.
+      const prev = pendingStorageWrites.get(name);
+      if (prev) clearTimeout(prev);
+      pendingStorageWrites.set(
+        name,
+        setTimeout(() => {
+          pendingStorageWrites.delete(name);
+          try {
+            window.localStorage.setItem(name, value);
+          } catch {}
+        }, STORAGE_WRITE_DELAY_MS)
+      );
     } catch {}
   },
   removeItem: (name: string): void => {
@@ -106,6 +126,12 @@ const safeStorage: StateStorage = {
     } catch {}
   },
 };
+
+export interface DocViewState {
+  line: number;
+  col: number;
+  scrollTop: number;
+}
 
 export interface WorkspaceState {
   documents: DocumentState[];
@@ -121,6 +147,10 @@ export interface WorkspaceState {
   vaultRoot: string | null;
   /** Last scan of the vault root (never persisted — rescanned on launch). */
   vaultEntries: VaultEntry[];
+  /** Recently opened file paths (persisted, capped). Powers quick-reopen. */
+  recentPaths: string[];
+  /** Per-document caret + scroll (persisted, restored on launch). */
+  docViewState: Record<string, DocViewState>;
 
   createEmptyDocument: (title?: string, parentId?: string | null) => void;
   createFolder: (name?: string, parentId?: string | null) => void;
@@ -155,6 +185,9 @@ export interface WorkspaceState {
   markDocumentSaved: (id: string, newPath?: string) => void;
   updateCursorPosition: (line: number, col: number) => void;
   updateCursorStats: (line: number, col: number) => void;
+  updateDocViewState: (id: string, partial: Partial<DocViewState>) => void;
+  /** Re-read open vault files on launch; clean docs adopt disk, dirty docs flag conflict. */
+  rehydrateVaultDocs: () => Promise<void>;
 }
 
 const initialDoc = createDocumentState(WELCOME_DOC, null);
@@ -466,6 +499,14 @@ async function reconcileVaultPath(path: string): Promise<void> {
   }
 }
 
+const MAX_RECENT_PATHS = 10;
+
+/** Most-recent-first, deduped file path list for quick-reopen. */
+function pushRecent(prev: string[], path: string): string[] {
+  const next = [path, ...prev.filter((p) => p !== path)];
+  return next.slice(0, MAX_RECENT_PATHS);
+}
+
 export const useWorkspaceStore = create<WorkspaceState>()(
   persist(
     (set, get) => ({
@@ -480,6 +521,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       readingTimeMin: computeReadingTime(computeWordCount(WELCOME_DOC)),
       vaultRoot: null,
       vaultEntries: [],
+      recentPaths: [],
+      docViewState: {},
 
       createEmptyDocument: (title?: string, parentId: string | null = null) => {
         set((state) => {
@@ -664,11 +707,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         set((state) => {
           const existing = state.documents.find((d) => d.meta.filePath === filePath && filePath !== null);
           if (existing) {
-            return { activeDocumentId: existing.id };
+            return {
+              activeDocumentId: existing.id,
+              recentPaths: filePath ? pushRecent(state.recentPaths, filePath) : state.recentPaths,
+            };
           }
           return {
             documents: [...state.documents, doc],
             activeDocumentId: doc.id,
+            recentPaths: filePath ? pushRecent(state.recentPaths, filePath) : state.recentPaths,
           };
         });
       },
@@ -909,24 +956,29 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       },
 
       markDocumentSaved: (id: string, newPath?: string) => {
-        set((state) => ({
-          documents: state.documents.map((doc) => {
-            if (doc.id === id) {
-              return {
-                ...doc,
-                initialText: doc.currentText,
-                isDirty: false,
-                hasCustomName: newPath ? true : doc.hasCustomName,
-                meta: {
-                  ...doc.meta,
-                  filePath: newPath || doc.meta.filePath,
-                  fileName: newPath ? newPath.split(/[\/\\]/).pop() || doc.meta.fileName : doc.meta.fileName,
-                },
-              };
-            }
-            return doc;
-          }),
-        }));
+        set((state) => {
+          const target = state.documents.find((d) => d.id === id);
+          const savedPath = newPath || target?.meta.filePath || null;
+          return {
+            documents: state.documents.map((doc) => {
+              if (doc.id === id) {
+                return {
+                  ...doc,
+                  initialText: doc.currentText,
+                  isDirty: false,
+                  hasCustomName: newPath ? true : doc.hasCustomName,
+                  meta: {
+                    ...doc.meta,
+                    filePath: newPath || doc.meta.filePath,
+                    fileName: newPath ? newPath.split(/[/\\]/).pop() || doc.meta.fileName : doc.meta.fileName,
+                  },
+                };
+              }
+              return doc;
+            }),
+            recentPaths: savedPath ? pushRecent(state.recentPaths, savedPath) : state.recentPaths,
+          };
+        });
       },
 
       openVault: async () => {
@@ -961,7 +1013,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           (d) => d.meta.filePath === path && !d.deletedAt
         );
         if (existing) {
-          set({ activeDocumentId: existing.id });
+          set((s) => ({
+            activeDocumentId: existing.id,
+            recentPaths: pushRecent(s.recentPaths, path),
+          }));
           return;
         }
         const result = await readFile(path);
@@ -982,6 +1037,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           wordCount: computeWordCount(doc.currentText),
           charCount: doc.currentText.length,
           readingTimeMin: computeReadingTime(computeWordCount(doc.currentText)),
+          recentPaths: pushRecent(state.recentPaths, path),
         }));
       },
 
@@ -1081,36 +1137,106 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           return { cursorLine: line, cursorCol: col };
         });
       },
+
+      updateDocViewState: (id: string, partial: Partial<DocViewState>) => {
+        set((state) => {
+          const prev = state.docViewState[id];
+          return {
+            docViewState: {
+              ...state.docViewState,
+              [id]: {
+                line: partial.line ?? prev?.line ?? 1,
+                col: partial.col ?? prev?.col ?? 1,
+                scrollTop: partial.scrollTop ?? prev?.scrollTop ?? 0,
+              },
+            },
+          };
+        });
+      },
+
+      rehydrateVaultDocs: async () => {
+        if (!isTauriEnvironment()) return;
+        const docs = get().documents.filter((d) => d.meta.filePath && !d.deletedAt);
+        for (const doc of docs) {
+          const path = doc.meta.filePath!;
+          let result: FileReadResult;
+          try {
+            result = await readFile(path);
+          } catch {
+            // Deleted while we were away — surface the deleted banner.
+            useWorkspaceStore.setState((s) => ({
+              documents: s.documents.map((d) => (d.id === doc.id ? { ...d, syncDeleted: true } : d)),
+            }));
+            continue;
+          }
+          if (result.hash === doc.meta.hash) {
+            useWorkspaceStore.setState((s) => ({
+              documents: s.documents.map((d) =>
+                d.id === doc.id ? { ...d, meta: { ...d.meta, mtime: result.mtime } } : d
+              ),
+            }));
+            continue;
+          }
+          if (!doc.isDirty && doc.currentText === doc.initialText) {
+            adoptDiskResult(doc.id, result);
+          } else {
+            // Crash-era or external edit under a dirty buffer — let the user choose.
+            useWorkspaceStore.setState((s) => ({
+              documents: s.documents.map((d) => (d.id === doc.id ? { ...d, syncConflict: true } : d)),
+            }));
+          }
+        }
+      },
     }),
     {
       name: 'manicule_workspace_history',
       storage: createJSONStorage(() => safeStorage),
       partialize: (state) => ({
-        documents: state.documents,
+        // Trash is session-only: deleted docs never survive a reload, which
+        // also bounds localStorage growth. Cap open tabs to the last 50.
+        documents: state.documents.filter((d) => !d.deletedAt).slice(-50),
         folders: state.folders,
         collapsedIds: state.collapsedIds,
         activeDocumentId: state.activeDocumentId,
         vaultRoot: state.vaultRoot,
+        recentPaths: state.recentPaths,
+        docViewState: state.docViewState,
+        cursorLine: state.cursorLine,
+        cursorCol: state.cursorCol,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
           state.folders = state.folders || [];
           state.collapsedIds = state.collapsedIds || [];
+          state.recentPaths = Array.isArray(state.recentPaths) ? state.recentPaths.slice(0, 10) : [];
+          state.docViewState =
+            state.docViewState && typeof state.docViewState === 'object' ? state.docViewState : {};
           // Vault entries are never persisted — rescanned on launch (App mount).
           state.vaultRoot = state.vaultRoot ?? null;
           state.vaultEntries = [];
 
           if (state.documents && state.documents.length > 0) {
             const seenIds = new Set<string>();
-            state.documents = state.documents.map((doc) => {
-              let id = doc.id;
-              if (!id || seenIds.has(id)) {
-                id = generateDocId();
-              }
-              seenIds.add(id);
-              // syncConflict / syncDeleted are live-session flags, never restored.
-              return { ...doc, id, parentId: doc.parentId ?? null, syncConflict: false, syncDeleted: false };
-            });
+            state.documents = state.documents
+              .filter((doc) => !doc.deletedAt)
+              .slice(-50)
+              .map((doc) => {
+                let id = doc.id;
+                if (!id || seenIds.has(id)) {
+                  id = generateDocId();
+                }
+                seenIds.add(id);
+                // syncConflict / syncDeleted are live-session flags, never restored.
+                // isDirty is recomputed from text so a crash-era buffer shows correctly.
+                return {
+                  ...doc,
+                  id,
+                  parentId: doc.parentId ?? null,
+                  syncConflict: false,
+                  syncDeleted: false,
+                  isDirty: doc.currentText !== doc.initialText,
+                };
+              });
 
             const activeDoc =
               state.documents.find((d) => d.id === state.activeDocumentId) || state.documents[0];

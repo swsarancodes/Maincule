@@ -90,6 +90,42 @@ describe('Asset helpers', () => {
   });
 });
 
+describe('Session restore', () => {
+  test('openDocument tracks recent file paths (dedupe, most-recent-first)', () => {
+    const store = useWorkspaceStore.getState();
+    store.openDocument('# R1\n', '/tmp/session-r1.md');
+    store.openDocument('# R2\n', '/tmp/session-r2.md');
+    store.openDocument('# R1 again\n', '/tmp/session-r1.md');
+    const recent = useWorkspaceStore.getState().recentPaths;
+    expect(recent[0]).toBe('/tmp/session-r1.md');
+    expect(recent).toContain('/tmp/session-r2.md');
+    expect(recent.filter((p) => p === '/tmp/session-r1.md').length).toBe(1);
+  });
+
+  test('updateDocViewState merges caret and scroll per doc', () => {
+    const store = useWorkspaceStore.getState();
+    store.createEmptyDocument('CX View Doc.md');
+    const docId = useWorkspaceStore.getState().activeDocumentId!;
+    store.updateDocViewState(docId, { line: 5, col: 3 });
+    store.updateDocViewState(docId, { scrollTop: 120 });
+    const saved = useWorkspaceStore.getState().docViewState[docId];
+    expect(saved).toMatchObject({ line: 5, col: 3, scrollTop: 120 });
+    store.updateDocViewState(docId, { line: 7 });
+    expect(useWorkspaceStore.getState().docViewState[docId]).toMatchObject({
+      line: 7,
+      col: 3,
+      scrollTop: 120,
+    });
+  });
+
+  test('markDocumentSaved records the saved path as recent', () => {
+    const store = useWorkspaceStore.getState();
+    store.createEmptyDocument('CX Save Recent.md');
+    const docId = useWorkspaceStore.getState().activeDocumentId!;
+    store.markDocumentSaved(docId, '/tmp/session-saved.md');
+    expect(useWorkspaceStore.getState().recentPaths[0]).toBe('/tmp/session-saved.md');
+  });
+});
 describe('Disk guards (browser build)', () => {
   test('hasDiskHash only accepts Rust-issued SHA-256 hex', () => {
     expect(hasDiskHash('a'.repeat(64))).toBe(true);

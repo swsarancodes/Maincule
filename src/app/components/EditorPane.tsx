@@ -29,6 +29,7 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
   const setActiveDoc = useWorkspaceStore((s) => s.setActiveDocument);
   const updateContent = useWorkspaceStore((s) => s.updateDocumentContent);
   const updateCursorStats = useWorkspaceStore((s) => s.updateCursorStats);
+  const updateDocViewState = useWorkspaceStore((s) => s.updateDocViewState);
 
   const globalMode = useSettingsStore((s) => s.mode);
   const typewriterMode = useSettingsStore((s) => s.typewriterMode);
@@ -176,6 +177,8 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
         if (!view) return;
 
         updateCursorStats(line, col);
+        const id = activeDocIdRef.current;
+        if (id) updateDocViewState(id, { line, col });
 
         const sel = view.state.selection.main;
 
@@ -309,11 +312,20 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
 
     // Keep emptyLinePlus correctly positioned during scroll or resize,
     // and keep the floating toolbar glued to the selection while scrolling.
+    // Scroll offset is mirrored into the session view-state for restore.
+    let scrollSaveTimer: ReturnType<typeof setTimeout> | null = null;
     const handleScroll = () => {
       requestAnimationFrame(() => {
         updateEmptyPlusState();
         updateFloatingPos();
       });
+      const docId = activeDocIdRef.current;
+      if (!docId) return;
+      if (scrollSaveTimer) clearTimeout(scrollSaveTimer);
+      scrollSaveTimer = setTimeout(() => {
+        const v = viewRef.current;
+        if (v) updateDocViewState(docId, { scrollTop: v.scrollDOM.scrollTop });
+      }, 300);
     };
 
     const handleResize = () => {
@@ -323,10 +335,28 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ modeOverride }) => {
     view.scrollDOM.addEventListener('scroll', handleScroll, { passive: true });
     window.addEventListener('resize', handleResize);
 
+    // Restore last session's caret + scroll for this doc (session restore).
+    try {
+      const saved = useWorkspaceStore.getState().docViewState[activeDocId ?? ''];
+      if (saved && (saved.line > 1 || saved.col > 1 || saved.scrollTop > 0)) {
+        const lineNo = Math.min(Math.max(1, saved.line), view.state.doc.lines);
+        const line = view.state.doc.line(lineNo);
+        const pos = Math.min(line.from + Math.max(0, saved.col - 1), line.to);
+        view.dispatch({ selection: { anchor: pos, head: pos } });
+        if (saved.scrollTop > 0) {
+          requestAnimationFrame(() => {
+            const v = viewRef.current;
+            if (v) v.scrollDOM.scrollTop = saved.scrollTop;
+          });
+        }
+      }
+    } catch {}
+
     // Initial check on mount
     requestAnimationFrame(updateEmptyPlusState);
 
     return () => {
+      if (scrollSaveTimer) clearTimeout(scrollSaveTimer);
       view.scrollDOM.removeEventListener('scroll', handleScroll);
       window.removeEventListener('resize', handleResize);
       view.destroy();
