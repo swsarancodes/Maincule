@@ -1,5 +1,6 @@
 import { EditorView } from '@codemirror/view';
 import { MarkdownWidget } from './base';
+import { createBlockMenu } from './block-actions';
 
 let mermaidPromise: Promise<any> | null = null;
 let mermaidInstance: any = null;
@@ -149,7 +150,22 @@ export class MermaidWidget extends MarkdownWidget {
 
     const left = document.createElement('div');
     left.className = 'as-diagram-badge';
-    left.innerHTML = `<span class="as-diagram-dot"></span><span>Mermaid Diagram</span>`;
+    left.style.position = 'relative';
+
+    // Block menu badge: "● Mermaid Diagram ▾" -> Move up / Move down / Delete
+    const self = this;
+    const blockMenu = createBlockMenu({
+      view,
+      getWidget: () => self,
+      dom: container,
+      label: 'Mermaid Diagram',
+    });
+    // Prepend dot indicator inside badge
+    const dot = document.createElement('span');
+    dot.className = 'as-diagram-dot';
+    blockMenu.badgeBtn.prepend(dot);
+    left.appendChild(blockMenu.badgeBtn);
+    left.appendChild(blockMenu.menu);
 
     // Type Switcher Select
     const select = document.createElement('select');
@@ -256,21 +272,6 @@ export class MermaidWidget extends MarkdownWidget {
       }
     };
     right.appendChild(exportBtn);
-
-    // Delete Diagram Button
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'as-widget-btn as-widget-btn-danger';
-    deleteBtn.title = 'Delete Diagram Block';
-    deleteBtn.textContent = 'Delete';
-    deleteBtn.onclick = (e) => {
-      e.stopPropagation();
-      const range = this.resolveRange(view, container);
-      view.dispatch({
-        changes: { from: range.from, to: range.to, insert: '' },
-      });
-      view.focus();
-    };
-    right.appendChild(deleteBtn);
 
     toolbar.appendChild(right);
     container.appendChild(toolbar);

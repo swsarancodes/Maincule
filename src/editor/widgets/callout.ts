@@ -1,5 +1,6 @@
 import { EditorView } from '@codemirror/view';
 import { MarkdownWidget } from './base';
+import { deleteBlock } from './block-actions';
 
 export type CalloutType = 'NOTE' | 'TIP' | 'IMPORTANT' | 'WARNING' | 'CAUTION' | 'QUOTE';
 
@@ -138,20 +139,7 @@ export class CalloutWidget extends MarkdownWidget {
     // Helper to safely delete the entire blockquote/callout from CodeMirror
     const deleteBlockquote = (e?: Event) => {
       if (e) e.stopPropagation();
-      const range = this.resolveRange(view, container);
-      let from = range.from;
-      let to = range.to;
-      const doc = view.state.doc;
-      if (to < doc.length && doc.sliceString(to, to + 1) === '\n') {
-        to++;
-      } else if (from > 0 && doc.sliceString(from - 1, from) === '\n') {
-        from--;
-      }
-      view.dispatch({
-        changes: { from, to, insert: '' },
-        selection: { anchor: from },
-      });
-      view.focus();
+      deleteBlock(view, this, container);
     };
 
     // Helper to unquote/turn into plain text
@@ -184,7 +172,6 @@ export class CalloutWidget extends MarkdownWidget {
       }
       iconSpan.textContent = calloutIcons[newType] || '❝';
       container.className = `as-callout as-callout-${newType.toLowerCase()}`;
-      typeBtnText.textContent = calloutLabels[newType] || newType;
       bodyEl.setAttribute(
         'data-placeholder',
         newType === 'QUOTE' ? 'Quote text... (Backspace to remove)' : 'Write callout text...'
@@ -195,21 +182,7 @@ export class CalloutWidget extends MarkdownWidget {
       closeTypeMenu();
     };
 
-    // Type Switcher Button
-    const typeBtn = document.createElement('button');
-    typeBtn.type = 'button';
-    typeBtn.className = 'as-callout-btn as-callout-type-btn';
-    typeBtn.title = 'Change block type';
-    const typeBtnText = document.createElement('span');
-    typeBtnText.textContent = calloutLabels[parsed.type] || parsed.type;
-    const typeCaret = document.createElement('span');
-    typeCaret.textContent = ' ▾';
-    typeCaret.style.opacity = '0.6';
-    typeCaret.style.fontSize = '10px';
-    typeBtn.appendChild(typeBtnText);
-    typeBtn.appendChild(typeCaret);
-
-    // Type Switcher Dropdown Menu
+    // Type Switcher Dropdown Menu (opens via icon click)
     const typeMenu = document.createElement('div');
     typeMenu.className = 'as-callout-type-menu';
     typeMenu.style.display = 'none';
@@ -237,7 +210,6 @@ export class CalloutWidget extends MarkdownWidget {
       typeMenu.style.display = 'none';
     };
 
-    typeBtn.onclick = toggleTypeMenu;
     iconSpan.onclick = toggleTypeMenu;
 
     // Unquote / Turn into Text Button
@@ -248,7 +220,7 @@ export class CalloutWidget extends MarkdownWidget {
     unquoteBtn.title = 'Convert quote into normal text';
     unquoteBtn.onclick = unquoteBlockquote;
 
-    // Delete Button
+    // Direct Delete button (no dropdown)
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
     deleteBtn.className = 'as-callout-btn as-callout-delete-btn';
@@ -256,7 +228,6 @@ export class CalloutWidget extends MarkdownWidget {
     deleteBtn.title = 'Delete this quote/callout block';
     deleteBtn.onclick = deleteBlockquote;
 
-    actionBar.appendChild(typeBtn);
     actionBar.appendChild(typeMenu);
     actionBar.appendChild(unquoteBtn);
     actionBar.appendChild(deleteBtn);
@@ -264,7 +235,7 @@ export class CalloutWidget extends MarkdownWidget {
 
     // Close type menu when clicking anywhere else
     const handleDocClick = (e: MouseEvent) => {
-      if (!typeMenu.contains(e.target as Node) && e.target !== typeBtn && e.target !== iconSpan) {
+      if (!typeMenu.contains(e.target as Node) && e.target !== iconSpan) {
         closeTypeMenu();
       }
     };
@@ -387,7 +358,6 @@ export class CalloutWidget extends MarkdownWidget {
           parsed = parseCallout(newSource);
           iconSpan.textContent = calloutIcons[parsed.type] || '❝';
           container.className = `as-callout as-callout-${parsed.type.toLowerCase()}`;
-          typeBtnText.textContent = calloutLabels[parsed.type] || parsed.type;
           titleEl.style.display = parsed.type === 'QUOTE' ? 'none' : 'block';
           if (document.activeElement !== titleEl) {
             titleEl.textContent = parsed.title;

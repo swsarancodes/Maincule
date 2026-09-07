@@ -126,6 +126,17 @@ describe('Session restore', () => {
     store.markDocumentSaved(docId, '/tmp/session-saved.md');
     expect(useWorkspaceStore.getState().recentPaths[0]).toBe('/tmp/session-saved.md');
   });
+
+  test('openRecentPath prunes entries that fail to reopen', async () => {
+    const store = useWorkspaceStore.getState();
+    store.openDocument('# CX Stale\n', '/tmp/cx-stale-recent.md');
+    const docId = useWorkspaceStore.getState().activeDocumentId!;
+    // Close the tab so reopen must hit disk (unavailable in this build).
+    store.deleteDocument(docId);
+    expect(useWorkspaceStore.getState().recentPaths).toContain('/tmp/cx-stale-recent.md');
+    await useWorkspaceStore.getState().openRecentPath('/tmp/cx-stale-recent.md');
+    expect(useWorkspaceStore.getState().recentPaths).not.toContain('/tmp/cx-stale-recent.md');
+  });
 });
 describe('Vault delete guards (browser build)', () => {
   test('deleteVaultPath refuses to run outside the desktop shell', async () => {

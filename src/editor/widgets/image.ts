@@ -1,5 +1,6 @@
 import { EditorView } from '@codemirror/view';
 import { MarkdownWidget } from './base';
+import { createBlockMenu } from './block-actions';
 import { useWorkspaceStore } from '../../app/stores/workspace';
 import { resolveImageSrc } from '../../ipc/vault';
 
@@ -193,19 +194,39 @@ export class ImageWidget extends MarkdownWidget {
       view.focus();
     });
 
-    // Delete Image Action
-    const deleteBtn = makeBtn('Delete', 'Delete image', (e) => {
-      e.stopPropagation();
-      const range = this.resolveRange(view, container);
-      view.dispatch({
-        changes: { from: range.from, to: range.to, insert: '' },
-      });
-      view.focus();
+    // Block menu badge: "Image ▾" -> Move up / Move down / Delete
+    const self = this;
+    const blockMenu = createBlockMenu({
+      view,
+      getWidget: () => self,
+      dom: container,
+      label: 'Image',
     });
+    // Match dark floating bar styling for the badge trigger
+    blockMenu.badgeBtn.style.cssText = `
+      background: transparent;
+      border: none;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-family: inherit;
+      opacity: 0.9;
+    `;
+    // Menu needs a light surface even inside the dark hover bar
+    blockMenu.menu.style.colorScheme = 'light';
+
+    actionBar.appendChild(blockMenu.badgeBtn);
+    container.appendChild(blockMenu.menu);
+    // Anchor the dropdown to the image container
+    blockMenu.menu.style.top = '34px';
+    blockMenu.menu.style.right = '8px';
+    blockMenu.menu.style.left = 'auto';
 
     actionBar.appendChild(copyBtn);
     actionBar.appendChild(editBtn);
-    actionBar.appendChild(deleteBtn);
     innerWrapper.appendChild(actionBar);
 
     innerWrapper.onmouseenter = () => {

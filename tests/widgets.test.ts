@@ -277,8 +277,8 @@ describe('TableWidget In-Place Code & Visual Editing', () => {
     document.body.appendChild(view.dom);
 
     const container = view.dom.querySelector('.as-table-container') as HTMLElement;
-    const deleteBtn = Array.from(container.querySelectorAll('button')).find(
-      (b) => b.textContent === 'Delete'
+    const deleteBtn = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Delete')
     ) as HTMLButtonElement;
     expect(deleteBtn).toBeDefined();
 
@@ -413,7 +413,7 @@ describe('CodeBlockWidget and CalloutWidget In-Place Editing', () => {
     expect(nextWidget.updateDOM(dom, view)).toBe(true);
   });
 
-  test('CalloutWidget has action bar with Delete, Turn to Text, and Type Switcher', () => {
+  test('CalloutWidget has action bar with direct Delete, Turn to Text, and Type Switcher', () => {
     const source = '> This is an inspiring quote';
     const widget = new CalloutWidget(source, 0, source.length);
 
@@ -424,6 +424,7 @@ describe('CodeBlockWidget and CalloutWidget In-Place Editing', () => {
     const actionBar = dom.querySelector('.as-callout-actions');
     expect(actionBar).not.toBeNull();
 
+    // Direct Delete button (no dropdown)
     const deleteBtn = dom.querySelector('.as-callout-delete-btn') as HTMLButtonElement;
     expect(deleteBtn).not.toBeNull();
     expect(deleteBtn.textContent).toBe('Delete');
@@ -433,10 +434,11 @@ describe('CodeBlockWidget and CalloutWidget In-Place Editing', () => {
     ) as HTMLButtonElement;
     expect(unquoteBtn).not.toBeNull();
 
-    const typeBtn = dom.querySelector('.as-callout-type-btn') as HTMLButtonElement;
-    expect(typeBtn).not.toBeNull();
+    // Type switcher menu still opens via icon click
+    const typeMenu = dom.querySelector('.as-callout-type-menu') as HTMLElement;
+    expect(typeMenu).not.toBeNull();
 
-    // 1. Test Delete action
+    // 1. Test direct Delete action
     deleteBtn.click();
     expect(view.state.doc.toString()).toBe('');
 
@@ -787,8 +789,7 @@ PostgreSQL specifications.`;
   });
 });
 
-describe('KaTeX Math Formula Rendering', () => {
-  test('MathWidget renders inline math with KaTeX markup', () => {
+describe('KaTeX Math Formula Rendering', () => {  test('MathWidget renders inline math with KaTeX markup', () => {
     const widget = new MathWidget('E = mc^2', false);
     const mockView = {} as any;
     const dom = widget.toDOM(mockView);
@@ -830,3 +831,102 @@ describe('KaTeX Math Formula Rendering', () => {
 });
 
 
+describe('Shared Block Menu (Move up / Move down / Delete)', () => {
+  test('computeDelete removes block plus one adjacent newline', async () => {
+    const { computeDelete } = await import('../src/editor/widgets/block-actions');
+    const doc = '# Top\n\n| X | Y |\n| --- | --- |\n| 1 | 2 |\n\n# Bottom';
+    const from = doc.indexOf('| X');
+    const to = doc.indexOf('# Bottom') - 2;
+    const { newDoc, anchor } = computeDelete(doc, from, to);
+    expect(newDoc).not.toContain('| X | Y |');
+    expect(newDoc).toContain('# Top');
+    expect(newDoc).toContain('# Bottom');
+    expect(anchor).toBe(from);
+  });
+
+  test('computeMoveUp swaps block with previous paragraph', async () => {
+    const { computeMoveUp } = await import('../src/editor/widgets/block-actions');
+    const doc = '# Top\n\nBBB\n\nCCC\n\n# Bottom';
+    const from = doc.indexOf('CCC');
+    const res = computeMoveUp(doc, from, from + 3);
+    expect(res).not.toBeNull();
+    expect(res!.newDoc).toBe('# Top\n\nCCC\n\nBBB\n\n# Bottom');
+    expect(res!.anchor).toBe(doc.indexOf('BBB'));
+  });
+
+  test('computeMoveUp returns null for first block / after frontmatter', async () => {
+    const { computeMoveUp } = await import('../src/editor/widgets/block-actions');
+    expect(computeMoveUp('AAA\n\nBBB', 0, 3)).toBeNull();
+    const fm = '---\ntitle: Hi\n---\n\nAAA\n\nBBB';
+    const aFrom = fm.indexOf('AAA');
+    expect(computeMoveUp(fm, aFrom, aFrom + 3)).toBeNull();
+  });
+
+  test('computeMoveDown swaps block with next paragraph', async () => {
+    const { computeMoveDown } = await import('../src/editor/widgets/block-actions');
+    const doc = '# Top\n\nBBB\n\nCCC\n\n# Bottom';
+    const from = doc.indexOf('BBB');
+    const res = computeMoveDown(doc, from, from + 3);
+    expect(res).not.toBeNull();
+    expect(res!.newDoc).toBe('# Top\n\nCCC\n\nBBB\n\n# Bottom');
+  });
+
+  test('computeMoveDown returns null for last block', async () => {
+    const { computeMoveDown } = await import('../src/editor/widgets/block-actions');
+    const doc = 'AAA\n\nBBB';
+    const from = doc.indexOf('BBB');
+    expect(computeMoveDown(doc, from, from + 3)).toBeNull();
+  });
+
+  test('Every block widget exposes a Move/Delete dropdown menu', async () => {
+    const { createMarkdownExtension } = await import('../src/core/markdown/grammar');
+    const { blockWidgetField } = await import('../src/editor/widgets/plugin');
+    const doc = [
+      '> [!NOTE] Hello',
+      '> body text',
+      '',
+      '```mermaid',
+      'flowchart TD',
+      '  A --> B',
+      '```',
+      '',
+      '```python',
+      'print("hi")',
+      '```',
+      '',
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '',
+      '![Alt](https://example.com/x.png)',
+      '',
+      '---',
+      '',
+      'tail',
+    ].join('\n');
+    const state = EditorState.create({
+      doc,
+      extensions: [createMarkdownExtension(), blockWidgetField],
+    });
+    const view = new EditorView({ state });
+    document.body.appendChild(view.dom);
+
+    // Callout shows a direct Delete button; diagram, code, table use dropdown menus
+    expect(view.dom.querySelector('.as-callout .as-callout-delete-btn')).not.toBeNull();
+    expect(view.dom.querySelector('.as-diagram-container .as-block-menu')).not.toBeNull();
+    expect(view.dom.querySelector('.as-codeblock-container .as-block-menu')).not.toBeNull();
+    expect(view.dom.querySelector('.as-table-container .as-block-menu')).not.toBeNull();
+
+    // Move a table up via its menu and verify doc order changed
+    const tableMenu = view.dom.querySelector('.as-table-container .as-block-menu') as HTMLElement;
+    const moveUpBtn = Array.from(tableMenu.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Move up')
+    ) as HTMLButtonElement;
+    expect(moveUpBtn).toBeDefined();
+    moveUpBtn.click();
+    const after = view.state.doc.toString();
+    expect(after.indexOf('| A | B |')).toBeLessThan(after.indexOf('print("hi")'));
+
+    document.body.removeChild(view.dom);
+  });
+});

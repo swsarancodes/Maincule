@@ -16,6 +16,7 @@ import {
   FileDown,
   Sliders,
   AlignLeft,
+  History,
 } from 'lucide-react';
 import { formatDisplayName } from '../../core/document/file-meta';
 import { exportToPdf, exportToMarkdown, exportToHtml } from '../../core/document/export';
@@ -48,6 +49,7 @@ export const CommandPalette: React.FC = () => {
 
   const createEmpty = useWorkspaceStore((s) => s.createEmptyDocument);
   const setActiveDoc = useWorkspaceStore((s) => s.setActiveDocument);
+  const openRecentPath = useWorkspaceStore((s) => s.openRecentPath);
 
   // Global shortcut listener
   useEffect(() => {
@@ -237,6 +239,24 @@ export const CommandPalette: React.FC = () => {
           icon: FileText,
           run: () => setActiveDoc(doc.id),
         }))
+      : []),
+    ...(open
+      ? (() => {
+          const st = useWorkspaceStore.getState();
+          const openPaths = new Set(
+            st.documents.filter((d) => !d.deletedAt && d.meta.filePath).map((d) => d.meta.filePath as string)
+          );
+          return st.recentPaths
+            .filter((p) => !openPaths.has(p))
+            .slice(0, 8)
+            .map((path) => ({
+              id: `recent-${path}`,
+              title: `Reopen: ${formatDisplayName(path.split(/[/\\]/).pop() || path)}`,
+              category: 'Recent',
+              icon: History,
+              run: () => void openRecentPath(path),
+            }));
+        })()
       : []),
   ];
 

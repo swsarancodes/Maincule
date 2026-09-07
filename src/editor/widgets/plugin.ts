@@ -91,7 +91,8 @@ export function buildBlockWidgets(state: EditorState): DecorationSet {
 
       // 4. Horizontal Rules
       else if (name === 'HorizontalRule') {
-        const widget = new HRWidget();
+        const hrText = doc.sliceString(nodeFrom, nodeTo);
+        const widget = new HRWidget(hrText, nodeFrom, nodeTo);
         decos.push({
           from: nodeFrom,
           to: nodeTo,

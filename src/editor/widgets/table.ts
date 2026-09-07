@@ -1,5 +1,6 @@
 import { EditorView } from '@codemirror/view';
 import { MarkdownWidget } from './base';
+import { createBlockMenu } from './block-actions';
 
 export type ColumnAlign = 'left' | 'center' | 'right';
 
@@ -201,11 +202,19 @@ export class TableWidget extends MarkdownWidget {
     left.style.display = 'flex';
     left.style.alignItems = 'center';
     left.style.gap = '8px';
+    left.style.position = 'relative';
 
-    const titleBadge = document.createElement('span');
-    titleBadge.className = 'as-table-badge';
-    titleBadge.textContent = 'Table';
-    left.appendChild(titleBadge);
+    // Block menu badge: "Table ▾" -> Move up / Move down / Delete
+    const self = this;
+    const blockMenu = createBlockMenu({
+      view,
+      getWidget: () => self,
+      dom: container,
+      label: 'Table',
+    });
+    blockMenu.badgeBtn.classList.add('as-table-badge');
+    left.appendChild(blockMenu.badgeBtn);
+    left.appendChild(blockMenu.menu);
 
     // Mode Buttons: Visual | Split | Code
     const modeBtnGroup = document.createElement('div');
@@ -335,20 +344,6 @@ export class TableWidget extends MarkdownWidget {
       }, 1500);
     };
     actions.appendChild(copyBtn);
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.textContent = 'Delete';
-    deleteBtn.className = 'as-widget-btn as-widget-btn-danger';
-    deleteBtn.title = 'Delete Table';
-    deleteBtn.onclick = (e) => {
-      e.stopPropagation();
-      const range = stateObj.widget.resolveRange(view, container);
-      view.dispatch({
-        changes: { from: range.from, to: range.to, insert: '' },
-      });
-      view.focus();
-    };
-    actions.appendChild(deleteBtn);
 
     bar.appendChild(actions);
     container.appendChild(bar);

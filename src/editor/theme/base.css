@@ -1933,3 +1933,107 @@
   position: relative;
   z-index: 1;
 }
+
+/* ==========================================================================
+   Shared Block Menu (Fumadocs-style Move up / Move down / Delete dropdown)
+   ========================================================================== */
+.as-block-badge-btn {
+  background: transparent;
+  border: none;
+  color: var(--as-text-muted, #777);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: var(--as-radius-sm, 3px);
+  cursor: pointer;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all var(--as-transition-fast, 0.12s ease);
+  white-space: nowrap;
+}
+.as-block-badge-btn:hover {
+  background: var(--as-bg-hover, rgba(128, 128, 128, 0.12));
+  color: var(--as-text, #333);
+}
+.as-block-badge-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.as-block-badge-caret {
+  opacity: 0.6;
+  font-size: 10px;
+}
+.as-block-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: var(--as-bg-surface, #fff);
+  border: 1px solid var(--as-border, rgba(128, 128, 128, 0.2));
+  border-radius: var(--as-radius-md, 6px);
+  box-shadow: var(--as-shadow-md, 0 4px 14px rgba(0, 0, 0, 0.12));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 30;
+  min-width: 150px;
+}
+.as-block-menu-item {
+  background: transparent;
+  border: none;
+  color: var(--as-text, #333);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: inherit;
+  transition: background var(--as-transition-fast, 0.12s ease);
+}
+.as-block-menu-item:hover:not([disabled]) {
+  background: var(--as-bg-hover, rgba(128, 128, 128, 0.1));
+}
+.as-block-menu-item[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+.as-block-menu-icon {
+  width: 14px;
+  text-align: center;
+  opacity: 0.7;
+}
+.as-block-menu-item-danger {
+  color: #ef4444;
+}
+.as-block-menu-item-danger:hover:not([disabled]) {
+  background: rgba(239, 68, 68, 0.12) !important;
+}
+
+/* HR hover wrapper + badge */
+.as-hr-wrap {
+  position: relative;
+  padding: 6px 0;
+}
+.as-hr-wrap .as-hr-badge {
+  position: absolute;
+  top: -8px;
+  right: 8px;
+  opacity: 0;
+  pointer-events: none;
+  background: var(--as-bg-surface, #fff);
+  border: 1px solid var(--as-border, rgba(128, 128, 128, 0.2));
+  transition: opacity var(--as-transition-fast, 0.15s ease);
+}
+.as-hr-wrap:hover .as-hr-badge,
+.as-hr-wrap:focus-within .as-hr-badge {
+  opacity: 1;
+  pointer-events: auto;
+}

@@ -1,5 +1,6 @@
 import { EditorView } from '@codemirror/view';
 import { MarkdownWidget } from './base';
+import { createBlockMenu } from './block-actions';
 
 interface CodeBlockWidgetState {
   widget: CodeBlockWidget;
@@ -51,10 +52,24 @@ export class CodeBlockWidget extends MarkdownWidget {
     const toolbar = document.createElement('div');
     toolbar.className = 'as-codeblock-toolbar';
 
-    const langBadge = document.createElement('span');
-    langBadge.className = 'as-codeblock-badge';
-    langBadge.textContent = this.language.toUpperCase() || 'CODE';
-    toolbar.appendChild(langBadge);
+    const badgeWrap = document.createElement('div');
+    badgeWrap.className = 'as-codeblock-badge-wrap';
+    badgeWrap.style.position = 'relative';
+    badgeWrap.style.display = 'flex';
+    badgeWrap.style.alignItems = 'center';
+
+    // Block menu badge: "PYTHON ▾" -> Move up / Move down / Delete
+    const self = this;
+    const blockMenu = createBlockMenu({
+      view,
+      getWidget: () => self,
+      dom: container,
+      label: () => (this.language ? this.language.toUpperCase() : 'CODE'),
+    });
+    blockMenu.badgeBtn.classList.add('as-codeblock-badge');
+    badgeWrap.appendChild(blockMenu.badgeBtn);
+    badgeWrap.appendChild(blockMenu.menu);
+    toolbar.appendChild(badgeWrap);
 
     const actions = document.createElement('div');
     actions.className = 'as-codeblock-actions';
@@ -78,20 +93,6 @@ export class CodeBlockWidget extends MarkdownWidget {
     editBtn.textContent = 'Edit';
     editBtn.title = 'Toggle code editing';
     actions.appendChild(editBtn);
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'as-widget-btn as-widget-btn-danger';
-    deleteBtn.textContent = 'Delete';
-    deleteBtn.title = 'Delete code block';
-    deleteBtn.onclick = (e) => {
-      e.stopPropagation();
-      const range = this.resolveRange(view, container);
-      view.dispatch({
-        changes: { from: range.from, to: range.to, insert: '' },
-      });
-      view.focus();
-    };
-    actions.appendChild(deleteBtn);
 
     toolbar.appendChild(actions);
     container.appendChild(toolbar);

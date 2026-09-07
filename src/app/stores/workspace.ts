@@ -172,6 +172,8 @@ export interface WorkspaceState {
   openVault: () => Promise<void>;
   refreshVault: () => Promise<void>;
   openVaultFile: (path: string) => Promise<void>;
+  /** Reopen a recent path; drops it from recents when unreadable. */
+  openRecentPath: (path: string) => Promise<void>;
   /** Move a vault file/dir to the OS Trash; closes affected tabs. */
   deleteVaultFile: (path: string) => Promise<void>;
   closeVault: () => void;
@@ -1042,6 +1044,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           readingTimeMin: computeReadingTime(computeWordCount(doc.currentText)),
           recentPaths: pushRecent(state.recentPaths, path),
         }));
+      },
+
+      openRecentPath: async (path: string) => {
+        try {
+          await get().openVaultFile(path);
+        } catch (e) {
+          // Stale entry (deleted file, closed vault, browser build) —
+          // prune it instead of stranding a dead row in the UI.
+          console.warn('Recent reopen failed, pruning:', e);
+          set((s) => ({ recentPaths: s.recentPaths.filter((p) => p !== path) }));
+        }
       },
 
       closeVault: () => {
