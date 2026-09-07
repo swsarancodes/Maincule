@@ -93,6 +93,7 @@ export const ImageModal: React.FC<ImageModalProps> = ({
 
   return (
     <div
+      className="as-image-modal"
       style={{
         position: 'fixed',
         top: 0,

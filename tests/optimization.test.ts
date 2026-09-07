@@ -8,6 +8,7 @@ import { syncDocumentHeading, extractDocumentHeading } from '../src/core/documen
 import { extractDocumentHeadings, findActiveHeading } from '../src/app/components/DocumentOutline';
 import { searchWorkspace } from '../src/core/search/full-text-search';
 import { exportToMarkdown, exportToHtml } from '../src/core/document/export';
+import { renderMarkdownToHtmlBody } from '../src/core/document/render-html';
 
 beforeAll(() => {
   const window = new GlobalWindow();
@@ -512,7 +513,7 @@ describe('Export Utilities (Markdown, HTML, PDF)', () => {
     document.createElement = origCreateElement;
   });
 
-  test('exportToHtml creates download anchor with html extension and escaped content', () => {
+  test('exportToHtml creates download anchor with html extension', async () => {
     let clickedDownload = '';
 
     const origCreateElement = document.createElement.bind(document);
@@ -526,10 +527,43 @@ describe('Export Utilities (Markdown, HTML, PDF)', () => {
       return el;
     };
 
-    exportToHtml('Release Notes.md', '# Release v0.2.0\n<script>alert(1)</script>');
+    await exportToHtml('Release Notes.md', '# Release v0.2.0');
     expect(clickedDownload).toBe('Release Notes.html');
 
     document.createElement = origCreateElement;
+  });
+});
+
+describe('HTML export renderer (F1)', () => {
+  test('renders headings, tables, and task lists', async () => {
+    const body = await renderMarkdownToHtmlBody(
+      '# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- [ ] task\n'
+    );
+    expect(body).toContain('<h1>Title</h1>');
+    expect(body).toContain('<table>');
+    expect(body).toContain('task-list-item');
+  });
+
+  test('strips front matter from the rendered body', async () => {
+    const body = await renderMarkdownToHtmlBody('---\ntitle: Secret\n---\n\n# Visible\n');
+    expect(body).not.toContain('Secret');
+    expect(body).toContain('<h1>Visible</h1>');
+  });
+
+  test('raw HTML stays inert (no live script in output)', async () => {
+    const body = await renderMarkdownToHtmlBody('# T\n<script>alert(1)</script>\n');
+    expect(body).not.toContain('<script>');
+  });
+
+  test('math renders as MathML without external assets', async () => {
+    const body = await renderMarkdownToHtmlBody('Euler: $e^{i\\pi}$\n');
+    expect(body).toContain('<math');
+    expect(body).not.toContain('katex.min.css');
+  });
+
+  test('mermaid fences fall back to code blocks', async () => {
+    const body = await renderMarkdownToHtmlBody('```mermaid\nflowchart TD\n```\n');
+    expect(body).toContain('flowchart TD');
   });
 });
 

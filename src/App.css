@@ -114,3 +114,61 @@ button {
     background-color: #0f0f0f69;
   }
 }
+
+/* Print pipeline (F2): exportToPdf() is window.print() against these rules.
+ * App chrome is hidden; only the editor column prints, forced light. */
+@media print {
+  :root {
+    color: #1a1a1a !important;
+    background-color: #ffffff !important;
+  }
+
+  .as-sidebar,
+  .as-sidebar-backdrop,
+  .as-tabbar,
+  .as-statusbar,
+  .as-breadcrumbs,
+  .as-outline-drawer,
+  .as-outline-backdrop,
+  .as-floating-toolbar,
+  .as-slash-menu,
+  .as-image-modal,
+  .as-command-palette,
+  .as-search-modal,
+  .as-sync-banner {
+    display: none !important;
+  }
+
+  .as-editor-container {
+    overflow: visible !important;
+    height: auto !important;
+  }
+  .as-editor-container .cm-scroller,
+  .as-editor-container .cm-content {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  /* Interactive widget chrome never prints; front-matter values do. */
+  .as-editor-container button {
+    display: none !important;
+  }
+  .as-editor-container input {
+    border: none !important;
+    background: none !important;
+    padding: 0 !important;
+  }
+
+  .as-editor-container pre {
+    white-space: pre-wrap !important;
+    word-break: break-word;
+  }
+  .as-editor-container table,
+  .as-editor-container pre,
+  .as-editor-container blockquote {
+    break-inside: avoid;
+  }
+  .as-editor-container tr {
+    break-inside: avoid;
+  }
+}

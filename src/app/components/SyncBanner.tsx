@@ -24,6 +24,7 @@ export const SyncBanner: React.FC<{ docId: string | null }> = ({ docId }) => {
   return (
     <div
       role="alert"
+      className="as-sync-banner"
       style={{
         display: 'flex',
         alignItems: 'center',

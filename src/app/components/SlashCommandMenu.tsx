@@ -419,6 +419,7 @@ export const SlashCommandMenu: React.FC<SlashMenuProps> = ({
   return (
     <div
       ref={listRef}
+      className="as-slash-menu"
       style={{
         position: 'fixed',
         top: `${menuTop}px`,

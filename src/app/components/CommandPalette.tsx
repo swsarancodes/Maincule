@@ -269,6 +269,7 @@ export const CommandPalette: React.FC = () => {
 
   return (
     <div
+      className="as-command-palette"
       onClick={() => setOpen(false)}
       style={{
         position: 'fixed',

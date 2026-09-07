@@ -27,6 +27,7 @@ export const StatusBar: React.FC = () => {
 
   return (
     <div
+      className="as-statusbar"
       style={{
         display: 'flex',
         alignItems: 'center',

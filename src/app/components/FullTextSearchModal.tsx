@@ -116,6 +116,7 @@ export const FullTextSearchModal: React.FC = () => {
       role="dialog"
       aria-modal="true"
       aria-label="Full-Text Search"
+      className="as-search-modal"
       onClick={() => setIsOpen(false)}
       style={{
         position: 'fixed',
