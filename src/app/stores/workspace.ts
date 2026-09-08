@@ -18,12 +18,40 @@ import {
   setVaultRoot,
   listVaultFiles,
   deleteVaultPath,
+  createVaultFile as ipcCreateVaultFile,
+  createVaultDir as ipcCreateVaultDir,
+  renameVaultPath as ipcRenameVaultPath,
   startVaultWatch,
   stopVaultWatch,
 } from '../../ipc/vault';
 import type { VaultEntry, VaultChangeEvent } from '../../ipc/vault';
 import { isTauriEnvironment, readFile } from '../../ipc/client';
 import type { FileReadResult } from '../../ipc/client';
+import {
+  rebuildSearchIndex,
+  upsertSearchPath,
+  removeSearchPath,
+} from '../../ipc/search';
+
+// ---------------------------------------------------------------------------
+// Search index maintenance (Rust FTS5, desktop only)
+//
+// The on-disk index covers closed vault files that the in-memory modal search
+// cannot see. Rebuilds are debounced and fire-and-forget so typing/autosave
+// never blocks on indexing; single-path upserts keep saves/watcher events
+// fresh without a full rescan.
+// ---------------------------------------------------------------------------
+
+let searchRebuildTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSearchRebuild(): void {
+  if (!isTauriEnvironment()) return;
+  if (searchRebuildTimer) clearTimeout(searchRebuildTimer);
+  searchRebuildTimer = setTimeout(() => {
+    searchRebuildTimer = null;
+    void rebuildSearchIndex().catch((e) => console.warn('Search index rebuild failed:', e));
+  }, 1500);
+}
 
 const WELCOME_DOC = `# Manicule ☞
 
@@ -176,6 +204,12 @@ export interface WorkspaceState {
   openRecentPath: (path: string) => Promise<void>;
   /** Move a vault file/dir to the OS Trash; closes affected tabs. */
   deleteVaultFile: (path: string) => Promise<void>;
+  /** Create a markdown file in the vault, refresh tree, open it. */
+  createVaultFile: (dir?: string, name?: string) => Promise<void>;
+  /** Create a folder in the vault and refresh the tree. */
+  createVaultFolder: (dir?: string, name?: string) => Promise<void>;
+  /** Rename a vault file/folder; retargets open tabs. */
+  renameVaultEntry: (oldPath: string, newName: string) => Promise<void>;
   closeVault: () => void;
   /** Subscribe to backend watcher events (idempotent; desktop only). */
   startVaultSync: () => void;
@@ -259,6 +293,52 @@ export function flushPendingAutoRename(): void {
   const ids = [...pendingAutoRenameIds];
   pendingAutoRenameIds.clear();
   for (const targetId of ids) applyAutoRename(targetId);
+}
+
+// ---------------------------------------------------------------------------
+// Word-count stats (debounced off the typing critical path)
+//
+// computeWordCount is O(n): running it on every keystroke janks large docs.
+// Content lands immediately in updateDocumentContent; this trails by 250ms
+// and only touches the status-bar counters (+ persist payload).
+// ---------------------------------------------------------------------------
+
+const STATS_DELAY_MS = 250;
+let statsTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingStats: { id: string; text: string } | null = null;
+
+function scheduleStatsUpdate(id: string, text: string): void {
+  pendingStats = { id, text };
+  if (statsTimer) clearTimeout(statsTimer);
+  statsTimer = setTimeout(() => {
+    statsTimer = null;
+    const cur = pendingStats;
+    pendingStats = null;
+    if (!cur) return;
+    const words = computeWordCount(cur.text);
+    useWorkspaceStore.setState(() => ({
+      wordCount: words,
+      charCount: cur.text.length,
+      readingTimeMin: computeReadingTime(words),
+    }));
+  }, STATS_DELAY_MS);
+}
+
+/** Test hook: flush pending stats synchronously. */
+export function flushPendingStats(): void {
+  if (statsTimer) {
+    clearTimeout(statsTimer);
+    statsTimer = null;
+  }
+  const cur = pendingStats;
+  pendingStats = null;
+  if (!cur) return;
+  const words = computeWordCount(cur.text);
+  useWorkspaceStore.setState(() => ({
+    wordCount: words,
+    charCount: cur.text.length,
+    readingTimeMin: computeReadingTime(words),
+  }));
 }
 
 function applyAutoRename(id: string): void {
@@ -391,6 +471,8 @@ function applySaveSuccess(id: string, hash: string, mtime: number, savedText: st
       };
     }),
   }));
+  // Keep the FTS index fresh without blocking the save path.
+  if (path) void upsertSearchPath(path).catch(() => {});
 }
 
 /** Test hook: run pending autosaves now instead of on a timer. */
@@ -472,6 +554,8 @@ async function reconcileVaultPath(path: string): Promise<void> {
   // The tree may have changed (created / removed / renamed) — resnapshot.
   // Concurrent scans are idempotent full snapshots; last write wins converges.
   await st.refreshVault();
+  // Index the changed path even when no tab has it open (new external file).
+  void upsertSearchPath(path).catch(() => {});
 
   if (!doc) return;
 
@@ -939,8 +1023,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       },
 
       updateDocumentContent: (id: string, newContent: string) => {
-        const words = computeWordCount(newContent);
-
+        // Critical path: content + dirty flag land synchronously so typing
+        // never waits on stats. Word counts are O(n) — debounce them so
+        // fast typing on large docs doesn't re-run a full scan per keystroke.
         set((state) => ({
           documents: state.documents.map((doc) => {
             if (doc.id === id) {
@@ -948,10 +1033,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             }
             return doc;
           }),
-          wordCount: words,
-          charCount: newContent.length,
-          readingTimeMin: computeReadingTime(words),
         }));
+        scheduleStatsUpdate(id, newContent);
 
         // Heading auto-rename is debounced (see scheduleAutoRename): the text
         // lands immediately, the tab label settles after the user pauses typing.
@@ -998,16 +1081,20 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         } catch (e) {
           console.warn('Vault watch failed:', e);
         }
+        scheduleSearchRebuild();
       },
 
       refreshVault: async () => {
-        const { vaultRoot } = get();
+        const { vaultRoot, vaultEntries } = get();
         if (!isTauriEnvironment() || !vaultRoot) return;
         try {
           // Re-register in case the backend restarted; then rescan.
           await setVaultRoot(vaultRoot);
           const entries = await listVaultFiles();
           set({ vaultEntries: entries });
+          // A changed file count means created/deleted files the index
+          // hasn't seen via upsert — schedule a background rebuild.
+          if (entries.length !== vaultEntries.length) scheduleSearchRebuild();
         } catch (e) {
           console.warn('Vault refresh failed:', e);
         }
@@ -1067,6 +1154,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       deleteVaultFile: async (path: string) => {
         if (!isTauriEnvironment()) return;
         await deleteVaultPath(path);
+        void removeSearchPath(path).catch(() => {});
         // Close tabs for the trashed path (and, for dirs, everything under
         // it) through the existing soft-delete, so TrashModal keeps working
         // for the tab. The watcher echo then only resnapshots the tree.
@@ -1090,6 +1178,64 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             docViewState: viewState,
           };
         });
+        await get().refreshVault();
+      },
+
+      createVaultFile: async (dir?: string, name?: string) => {
+        if (!isTauriEnvironment()) return;
+        const entry = await ipcCreateVaultFile(dir, name);
+        await get().refreshVault();
+        void upsertSearchPath(entry.path).catch(() => {});
+        await get().openVaultFile(entry.path);
+      },
+
+      createVaultFolder: async (dir?: string, name?: string) => {
+        if (!isTauriEnvironment()) return;
+        await ipcCreateVaultDir(dir, name);
+        await get().refreshVault();
+      },
+
+      renameVaultEntry: async (oldPath: string, newName: string) => {
+        if (!isTauriEnvironment()) return;
+        const entry = await ipcRenameVaultPath(oldPath, newName);
+        const norm = (p: string) => p.replace(/\\/g, '/');
+        // Retarget open tabs: exact file or everything under a renamed dir.
+        const isDirRename = entry.kind === 'dir';
+        const prefix = `${norm(oldPath)}/`;
+        set((s) => ({
+          documents: s.documents.map((d) => {
+            if (!d.meta.filePath || d.deletedAt) return d;
+            if (d.meta.filePath === oldPath) {
+              return {
+                ...d,
+                meta: {
+                  ...d.meta,
+                  filePath: entry.path,
+                  fileName: entry.name,
+                },
+              };
+            }
+            if (isDirRename && norm(d.meta.filePath).startsWith(prefix)) {
+              const rest = d.meta.filePath.slice(oldPath.length);
+              const nextPath = `${entry.path}${rest}`;
+              return {
+                ...d,
+                meta: {
+                  ...d.meta,
+                  filePath: nextPath,
+                },
+              };
+            }
+            return d;
+          }),
+          recentPaths: s.recentPaths.map((p) => {
+            if (p === oldPath) return entry.path;
+            if (isDirRename && norm(p).startsWith(prefix)) return `${entry.path}${p.slice(oldPath.length)}`;
+            return p;
+          }),
+        }));
+        void removeSearchPath(oldPath).catch(() => {});
+        void upsertSearchPath(entry.path).catch(() => {});
         await get().refreshVault();
       },
 
@@ -1201,6 +1347,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       rehydrateVaultDocs: async () => {
         if (!isTauriEnvironment()) return;
+        // Rebuild the disk index once per launch so closed files are searchable.
+        scheduleSearchRebuild();
         const docs = get().documents.filter((d) => d.meta.filePath && !d.deletedAt);
         for (const doc of docs) {
           const path = doc.meta.filePath!;

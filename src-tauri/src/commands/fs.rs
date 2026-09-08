@@ -403,6 +403,201 @@ pub fn delete_to_trash(
 }
 
 // ---------------------------------------------------------------------------
+// Vault mutation (D7): create file / dir, rename (== move within vault).
+// All paths are vault-scoped via resolve_in_vault. Rename doubles as move:
+// `new_path` may be in a different directory, parents are created.
+// ---------------------------------------------------------------------------
+
+fn vault_root_or_err(state: &tauri::State<VaultState>) -> Result<PathBuf, String> {
+    state
+        .0
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "No vault open. Open a folder first.".to_string())
+}
+
+fn ensure_md_name(name: &str) -> String {
+    let t = name.trim().trim_matches('/').trim();
+    if t.is_empty() {
+        return "Untitled.md".to_string();
+    }
+    if t.to_ascii_lowercase().ends_with(".md") || t.to_ascii_lowercase().ends_with(".markdown") {
+        t.to_string()
+    } else {
+        format!("{t}.md")
+    }
+}
+
+#[tauri::command]
+pub fn create_vault_file(
+    state: tauri::State<VaultState>,
+    dir: Option<String>,
+    name: Option<String>,
+    initial_content: Option<String>,
+) -> Result<VaultEntry, String> {
+    let root = vault_root_or_err(&state)?;
+    let dir_rel = dir.unwrap_or_default();
+    let parent = if dir_rel.is_empty() {
+        root.clone()
+    } else {
+        resolve_in_vault(&root, &dir_rel)?
+    };
+    if !parent.starts_with(&root) {
+        return Err("Path escapes the vault".to_string());
+    }
+    fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+    let file_name = ensure_md_name(&name.unwrap_or_else(|| "Untitled.md".to_string()));
+    if file_name.contains('/') || file_name.contains('\\') {
+        return Err("File name must not contain path separators".to_string());
+    }
+    let target = parent.join(&file_name);
+    // Contain again after join (dir could contain ..).
+    if !target.starts_with(&root) {
+        return Err("Path escapes the vault".to_string());
+    }
+    if target.exists() {
+        // Dedupe: Untitled.md -> Untitled - 2.md ...
+        let stem = file_name
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .unwrap_or(&file_name);
+        let ext = file_name.rsplit_once('.').map(|(_, e)| e).unwrap_or("md");
+        let mut n = 2;
+        let mut candidate = target.clone();
+        while candidate.exists() {
+            candidate = parent.join(format!("{stem} - {n}.{ext}"));
+            n += 1;
+            if n > 1000 {
+                return Err("Could not find a free file name".to_string());
+            }
+        }
+        let content = initial_content.unwrap_or_default();
+        atomic_write_bytes(&candidate, content.as_bytes())?;
+        let rel = candidate
+            .strip_prefix(&root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name_out = candidate
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        return Ok(VaultEntry {
+            path: candidate.to_string_lossy().to_string(),
+            rel,
+            name: name_out,
+            kind: VaultEntryKind::File,
+        });
+    }
+    let content = initial_content.unwrap_or_default();
+    atomic_write_bytes(&target, content.as_bytes())?;
+    let rel = target
+        .strip_prefix(&root)
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(VaultEntry {
+        path: target.to_string_lossy().to_string(),
+        rel,
+        name: file_name,
+        kind: VaultEntryKind::File,
+    })
+}
+
+#[tauri::command]
+pub fn create_vault_dir(
+    state: tauri::State<VaultState>,
+    dir: Option<String>,
+    name: Option<String>,
+) -> Result<VaultEntry, String> {
+    let root = vault_root_or_err(&state)?;
+    let dir_rel = dir.unwrap_or_default();
+    let parent = if dir_rel.is_empty() {
+        root.clone()
+    } else {
+        resolve_in_vault(&root, &dir_rel)?
+    };
+    let raw = name.unwrap_or_else(|| "New Folder".to_string());
+    let folder_name = raw.trim().trim_matches('/').to_string();
+    if folder_name.is_empty() || folder_name.contains('/') || folder_name.contains('\\') {
+        return Err("Folder name must not be empty or contain separators".to_string());
+    }
+    let target = parent.join(&folder_name);
+    if !target.starts_with(&root) {
+        return Err("Path escapes the vault".to_string());
+    }
+    if target.exists() {
+        return Err(format!("Already exists: {folder_name}"));
+    }
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    let rel = target
+        .strip_prefix(&root)
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(VaultEntry {
+        path: target.to_string_lossy().to_string(),
+        rel,
+        name: folder_name,
+        kind: VaultEntryKind::Dir,
+    })
+}
+
+#[tauri::command]
+pub fn rename_vault_path(
+    state: tauri::State<VaultState>,
+    old_path: String,
+    new_name: String,
+) -> Result<VaultEntry, String> {
+    let root = vault_root_or_err(&state)?;
+    let src = resolve_in_vault(&root, &old_path)?;
+    if src == root {
+        return Err("Refusing to rename the vault root itself".to_string());
+    }
+    if src.is_symlink() {
+        return Err("Refusing to rename a symlink".to_string());
+    }
+    if !src.exists() {
+        return Err("Not found".to_string());
+    }
+    let is_dir = src.is_dir();
+    let wanted = new_name.trim().trim_matches('/').to_string();
+    if wanted.is_empty() || wanted.contains('/') || wanted.contains('\\') {
+        return Err("Name must not be empty or contain separators".to_string());
+    }
+    let final_name = if is_dir {
+        wanted
+    } else {
+        ensure_md_name(&wanted)
+    };
+    let parent = src.parent().unwrap_or(&root).to_path_buf();
+    let dst = parent.join(&final_name);
+    if !dst.starts_with(&root) {
+        return Err("Path escapes the vault".to_string());
+    }
+    if dst.exists() {
+        return Err(format!("Already exists: {final_name}"));
+    }
+    fs::rename(&src, &dst).map_err(|e| e.to_string())?;
+    let rel = dst
+        .strip_prefix(&root)
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(VaultEntry {
+        path: dst.to_string_lossy().to_string(),
+        rel,
+        name: final_name,
+        kind: if is_dir {
+            VaultEntryKind::Dir
+        } else {
+            VaultEntryKind::File
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Live watcher: forwards vault file events to the frontend (`vault://file-changed`).
 // The frontend debounces per path, skips our own saves, and reconciles.
 // ---------------------------------------------------------------------------
@@ -702,6 +897,30 @@ mod tests {    use super::*;
         // Rejected trashes leave the vault untouched.
         assert!(dir.join("a.md").exists());
 
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn md_name_normalization_adds_extension() {
+        assert_eq!(ensure_md_name("note"), "note.md");
+        assert_eq!(ensure_md_name("note.md"), "note.md");
+        assert_eq!(ensure_md_name("  Untitled  "), "Untitled.md");
+        assert_eq!(ensure_md_name(""), "Untitled.md");
+        assert_eq!(ensure_md_name("a.markdown"), "a.markdown");
+    }
+
+    #[test]
+    fn create_and_rename_paths_stay_in_vault() {
+        let dir = unique_dir("mutate");
+        // resolve_in_vault is the containment gate for create/rename.
+        assert!(resolve_in_vault(&dir, "notes/a.md").is_ok());
+        assert!(resolve_in_vault(&dir, "../etc/passwd").is_err());
+        // rename dst must stay under root.
+        let src = dir.join("old.md");
+        fs::write(&src, b"# old").unwrap();
+        let dst = dir.join("new.md");
+        fs::rename(&src, &dst).unwrap();
+        assert!(dst.exists() && !src.exists());
         fs::remove_dir_all(&dir).ok();
     }
 }

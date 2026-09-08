@@ -25,8 +25,15 @@ pub fn run() {
             commands::fs::set_vault_root,
             commands::fs::read_vault_dir,
             commands::fs::delete_to_trash,
+            commands::fs::create_vault_file,
+            commands::fs::create_vault_dir,
+            commands::fs::rename_vault_path,
             commands::fs::start_vault_watch,
             commands::fs::stop_vault_watch,
+            commands::search::rebuild_search_index,
+            commands::search::search_vault,
+            commands::search::upsert_search_path,
+            commands::search::remove_search_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

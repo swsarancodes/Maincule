@@ -23,3 +23,4 @@ sha2 = "0.10"
 tauri-plugin-dialog = "2"
 notify = "8"
 trash = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }

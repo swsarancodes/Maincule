@@ -337,26 +337,30 @@ export function focusModeExtension(mode: 'off' | 'sentence' | 'paragraph' = 'off
         const builder = new RangeSetBuilder<Decoration>();
         const dimmedDeco = Decoration.line({ class: 'as-dimmed-line' });
 
+        // Perf guard: never walk more than ~400 visible lines per frame.
+        let seenLines = 0;
+
+        // Precompute the active paragraph block once (was O(lines²) before:
+        // every visible line re-scanned up to the active line).
+        let activeBlock: [number, number] | null = null;
+        if (mode === 'paragraph' && activeLine.text.trim() !== '') {
+          let start = activeLine.number;
+          while (start > 1 && view.state.doc.line(start - 1).text.trim() !== '') start--;
+          let end = activeLine.number;
+          const total = view.state.doc.lines;
+          while (end < total && view.state.doc.line(end + 1).text.trim() !== '') end++;
+          activeBlock = [start, end];
+        }
+
         for (const { from, to } of view.visibleRanges) {
           let pos = from;
           while (pos <= to) {
+            if (++seenLines > 400) break;
             const line = view.state.doc.lineAt(pos);
             let isFocused = false;
             if (mode === 'paragraph') {
-              if (line.number === activeLine.number) {
-                isFocused = true;
-              } else if (line.text.trim() !== '' && activeLine.text.trim() !== '') {
-                const minL = Math.min(line.number, activeLine.number);
-                const maxL = Math.max(line.number, activeLine.number);
-                let contiguous = true;
-                for (let l = minL; l <= maxL; l++) {
-                  if (view.state.doc.line(l).text.trim() === '') {
-                    contiguous = false;
-                    break;
-                  }
-                }
-                isFocused = contiguous;
-              }
+              isFocused =
+                activeBlock !== null && line.number >= activeBlock[0] && line.number <= activeBlock[1];
             } else {
               isFocused = line.number === activeLine.number;
             }
@@ -430,6 +434,10 @@ export function createEditorExtensions(options: EditorSetupOptions = {}): Extens
     }
   });
 
+  // highlightSelectionMatches is O(matches) per keystroke — skip it for
+  // very large docs where it dominates the 16ms keystroke budget.
+  const largeDoc = (options.initialDoc?.length ?? 0) > 200_000;
+
   return [
     codeFolding(),
     history(),
@@ -447,7 +455,7 @@ export function createEditorExtensions(options: EditorSetupOptions = {}): Extens
       top: true,
       createPanel: (view) => new AsterismSearchPanel(view),
     }),
-    highlightSelectionMatches(),
+    ...(largeDoc ? [] : [highlightSelectionMatches()]),
     closeBrackets(),
     typewriterCompartment.of(typewriterExtension(options.typewriterMode)),
     focusCompartment.of(focusModeExtension(options.focusMode)),

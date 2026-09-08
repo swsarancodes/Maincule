@@ -127,6 +127,29 @@ export async function deleteVaultPath(path: string): Promise<string> {
   return invoke<string>('delete_to_trash', { path });
 }
 
+/** Create a markdown file in the vault (dir = vault-relative or absolute). */
+export async function createVaultFile(dir?: string, name?: string): Promise<VaultEntry> {
+  if (!isTauriEnvironment()) throw new Error('Vault create needs the desktop shell');
+  const stem = (name ?? 'Untitled').replace(/\.(md|markdown)$/i, '');
+  return invoke<VaultEntry>('create_vault_file', {
+    dir: dir ?? null,
+    name: name ?? null,
+    initialContent: `# ${stem || 'Untitled'}\n\n`,
+  });
+}
+
+/** Create a folder in the vault. */
+export async function createVaultDir(dir?: string, name?: string): Promise<VaultEntry> {
+  if (!isTauriEnvironment()) throw new Error('Vault create needs the desktop shell');
+  return invoke<VaultEntry>('create_vault_dir', { dir: dir ?? null, name: name ?? null });
+}
+
+/** Rename a vault file or folder (same directory, new base name). */
+export async function renameVaultPath(path: string, newName: string): Promise<VaultEntry> {
+  if (!isTauriEnvironment()) throw new Error('Vault rename needs the desktop shell');
+  return invoke<VaultEntry>('rename_vault_path', { oldPath: path, newName });
+}
+
 export interface VaultChangeEvent {
   /** Absolute path that changed. */
   path: string;

@@ -47,6 +47,9 @@ export const Sidebar: React.FC = () => {
   const refreshVault = useWorkspaceStore((s) => s.refreshVault);
   const openVaultFile = useWorkspaceStore((s) => s.openVaultFile);
   const deleteVaultFile = useWorkspaceStore((s) => s.deleteVaultFile);
+  const createVaultFile = useWorkspaceStore((s) => s.createVaultFile);
+  const createVaultFolder = useWorkspaceStore((s) => s.createVaultFolder);
+  const renameVaultEntry = useWorkspaceStore((s) => s.renameVaultEntry);
   const closeVault = useWorkspaceStore((s) => s.closeVault);
 
   const isDesktop = isTauriEnvironment();
@@ -76,6 +79,54 @@ export const Sidebar: React.FC = () => {
       }
     },
     [deleteVaultFile]
+  );
+
+  const handleVaultCreateFile = React.useCallback(
+    async (dirRel?: string) => {
+      const name = window.prompt('New note name:', 'Untitled.md');
+      if (name === null) return;
+      try {
+        await createVaultFile(dirRel, name || 'Untitled.md');
+      } catch (err) {
+        console.warn('Vault create failed:', err);
+        window.alert(`Could not create note: ${err}`);
+      }
+    },
+    [createVaultFile]
+  );
+
+  const handleVaultCreateFolder = React.useCallback(
+    async (dirRel?: string) => {
+      const name = window.prompt('New folder name:', 'New Folder');
+      if (name === null) return;
+      if (!name.trim()) return;
+      try {
+        await createVaultFolder(dirRel, name.trim());
+      } catch (err) {
+        console.warn('Vault folder create failed:', err);
+        window.alert(`Could not create folder: ${err}`);
+      }
+    },
+    [createVaultFolder]
+  );
+
+  const handleVaultRename = React.useCallback(
+    async (node: VaultTreeNode, e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!node.path) return;
+      const next = window.prompt(
+        node.kind === 'dir' ? 'Rename folder:' : 'Rename note:',
+        node.name
+      );
+      if (next === null || next.trim() === '' || next === node.name) return;
+      try {
+        await renameVaultEntry(node.path, next.trim());
+      } catch (err) {
+        console.warn('Vault rename failed:', err);
+        window.alert(`Could not rename: ${err}`);
+      }
+    },
+    [renameVaultEntry]
   );
 
   const sidebarOpen = useSettingsStore((s) => s.sidebarOpen);
@@ -773,6 +824,47 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
               >
                 <button
                   type="button"
+                  title="New note here"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleVaultCreateFile(node.rel);
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--as-text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--as-accent)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+                >
+                  <Plus size={11} />
+                </button>
+                <button
+                  type="button"
+                  title="Rename folder"
+                  onClick={(e) => void handleVaultRename(node, e)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--as-text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--as-accent)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+                >
+                  <Pencil size={11} />
+                </button>
+                <button
+                  type="button"
                   title="Delete Folder"
                   onClick={(e) => void handleVaultDelete(node, e)}
                   style={{
@@ -843,6 +935,25 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
               transition: 'opacity var(--as-transition-fast)',
             }}
           >
+            <button
+              type="button"
+              title="Rename note"
+              onClick={(e) => void handleVaultRename(node, e)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--as-text-dim)',
+                cursor: 'pointer',
+                padding: '2px',
+                borderRadius: '3px',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--as-accent)')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+            >
+              <Pencil size={11} />
+            </button>
             <button
               type="button"
               title="Delete Note"
@@ -1370,6 +1481,44 @@ serialization step. Saving is \`doc.toString()\` plus line-ending restoration.
                 {`Vault · ${vaultRootName} (${vaultEntries.filter((e) => e.kind === 'file').length})`}
               </span>
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                <button
+                  type="button"
+                  title="New note in vault"
+                  onClick={() => void handleVaultCreateFile()}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--as-text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--as-accent)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+                >
+                  <Plus size={13} />
+                </button>
+                <button
+                  type="button"
+                  title="New folder in vault"
+                  onClick={() => void handleVaultCreateFolder()}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: 'var(--as-text-dim)',
+                    cursor: 'pointer',
+                    padding: '2px',
+                    borderRadius: '3px',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--as-accent)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--as-text-dim)')}
+                >
+                  <FolderPlus size={13} />
+                </button>
                 <button
                   type="button"
                   title="Rescan vault folder"
