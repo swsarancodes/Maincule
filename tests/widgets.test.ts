@@ -789,23 +789,28 @@ PostgreSQL specifications.`;
   });
 });
 
-describe('KaTeX Math Formula Rendering', () => {  test('MathWidget renders inline math with KaTeX markup', () => {
+describe('KaTeX Math Formula Rendering', () => {  test('MathWidget renders inline math with KaTeX markup', async () => {
     const widget = new MathWidget('E = mc^2', false);
     const mockView = {} as any;
     const dom = widget.toDOM(mockView);
 
     expect(dom.tagName.toLowerCase()).toBe('span');
     expect(dom.className).toBe('as-math-inline');
+    // Sync placeholder keeps keystroke→paint cheap; async KaTeX upgrade fills in.
+    expect(dom.textContent).toContain('E = mc^2');
+    await new Promise((r) => setTimeout(r, 100));
     expect(dom.innerHTML).toContain('katex');
   });
 
-  test('MathWidget renders block math with display mode', () => {
+  test('MathWidget renders block math with display mode', async () => {
     const widget = new MathWidget('\\sum_{i=1}^n i = \\frac{n(n+1)}{2}', true);
     const mockView = {} as any;
     const dom = widget.toDOM(mockView);
 
     expect(dom.tagName.toLowerCase()).toBe('div');
     expect(dom.className).toBe('as-math-block');
+    expect(dom.textContent).toContain('sum');
+    await new Promise((r) => setTimeout(r, 100));
     expect(dom.innerHTML).toContain('katex');
   });
 

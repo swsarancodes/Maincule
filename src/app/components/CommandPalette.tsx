@@ -46,6 +46,8 @@ export const CommandPalette: React.FC = () => {
   const toggleTypewriter = useSettingsStore((s) => s.toggleTypewriter);
   const focusMode = useSettingsStore((s) => s.focusMode);
   const setFocusMode = useSettingsStore((s) => s.setFocusMode);
+  const zenMode = useSettingsStore((s) => s.zenMode);
+  const toggleZenMode = useSettingsStore((s) => s.toggleZenMode);
 
   const createEmpty = useWorkspaceStore((s) => s.createEmptyDocument);
   const setActiveDoc = useWorkspaceStore((s) => s.setActiveDocument);
@@ -83,12 +85,16 @@ export const CommandPalette: React.FC = () => {
         e.preventDefault();
         const next = focusMode === 'off' ? 'paragraph' : focusMode === 'paragraph' ? 'sentence' : 'off';
         setFocusMode(next);
+      } else if (e.ctrlKey && e.metaKey && (e.key === '\\' || e.key === '|')) {
+        // Zen mode: C3 spec shortcut ⌃⌘| (pipe is Shift+\ on US layout).
+        e.preventDefault();
+        toggleZenMode();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [open, setMode, toggleSidebar, createEmpty, toggleTypewriter, focusMode, setFocusMode]);
+  }, [open, setMode, toggleSidebar, createEmpty, toggleTypewriter, focusMode, setFocusMode, toggleZenMode]);
 
   useEffect(() => {
     if (open) {
@@ -183,6 +189,14 @@ export const CommandPalette: React.FC = () => {
         const next = focusMode === 'off' ? 'paragraph' : focusMode === 'paragraph' ? 'sentence' : 'off';
         setFocusMode(next);
       },
+    },
+    {
+      id: 'toggle-zen',
+      title: `Toggle Zen Mode (${zenMode ? 'Active' : 'Disabled'})`,
+      category: 'Writing Environment',
+      icon: Eye,
+      shortcut: '⌃⌘\\',
+      run: () => toggleZenMode(),
     },
     {
       id: 'new-doc',

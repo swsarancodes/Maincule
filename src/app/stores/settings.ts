@@ -14,6 +14,8 @@ export interface SettingsState {
   focusMode: 'off' | 'sentence' | 'paragraph';
   fontSize: number;
   lineMeasure: string;
+  /** Distraction-free zen mode: hides sidebar/tabs/status/outline (transient). */
+  zenMode: boolean;
 
   setTheme: (theme: AppTheme) => void;
   setMode: (mode: ViewMode) => void;
@@ -24,6 +26,8 @@ export interface SettingsState {
   toggleTypewriter: () => void;
   setFocusMode: (mode: 'off' | 'sentence' | 'paragraph') => void;
   setFontSize: (size: number) => void;
+  toggleZenMode: () => void;
+  setZenMode: (zen: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -38,6 +42,7 @@ export const useSettingsStore = create<SettingsState>()(
       focusMode: 'off',
       fontSize: 16,
       lineMeasure: '72ch',
+      zenMode: false,
 
       setTheme: (theme) => set({ theme }),
       setMode: (mode) => set({ mode }),
@@ -48,11 +53,14 @@ export const useSettingsStore = create<SettingsState>()(
       toggleTypewriter: () => set((state) => ({ typewriterMode: !state.typewriterMode })),
       setFocusMode: (focusMode) => set({ focusMode }),
       setFontSize: (fontSize) => set({ fontSize }),
+      toggleZenMode: () => set((state) => ({ zenMode: !state.zenMode })),
+      setZenMode: (zenMode) => set({ zenMode }),
     }),
     {
       name: 'manicule_settings',
       storage: createJSONStorage(() => settingsStorage),
-      // searchModalOpen is transient UI; outline follows the doc.
+      // searchModalOpen, outlineOpen, and zenMode are transient UI;
+      // outline follows the doc, zen always starts off for a predictable launch.
       partialize: (s) => ({
         theme: s.theme,
         mode: s.mode,

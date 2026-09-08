@@ -1,7 +1,40 @@
 import { Extension } from '@codemirror/state';
 import { ViewPlugin, ViewUpdate, EditorView, Decoration, DecorationSet, WidgetType } from '@codemirror/view';
-import katex from 'katex';
+// CSS stays static (small, needed for correct layout once upgraded);
+// the heavy KaTeX JS + fonts are lazy-loaded below.
 import 'katex/dist/katex.min.css';
+
+// KaTeX is lazy-loaded: static import pulled ~200KB + fonts into the startup
+// chunk even for docs without formulas. Widgets render a plain-text
+// placeholder synchronously, then upgrade in place once the chunk arrives.
+// Rendered output is cached per formula so re-decorations skip re-render.
+type KatexLike = { renderToString: (tex: string, opts: any) => string };
+let katexPromise: Promise<KatexLike | null> | null = null;
+const renderCache = new Map<string, string>();
+const MAX_CACHE = 200;
+
+function loadKatex(): Promise<KatexLike | null> {
+  if (!katexPromise) {
+    katexPromise = import('katex').then(
+      (m: any) => (m?.default ?? m ?? null) as KatexLike | null,
+      () => null
+    );
+  }
+  return katexPromise;
+}
+
+function cachedRender(katex: KatexLike, latex: string, displayMode: boolean): string {
+  const key = `${displayMode ? 'b' : 'i'}:${latex}`;
+  const hit = renderCache.get(key);
+  if (hit !== undefined) return hit;
+  const html = katex.renderToString(latex.trim(), { displayMode, throwOnError: false });
+  if (renderCache.size >= MAX_CACHE) {
+    const oldest = renderCache.keys().next().value;
+    if (oldest !== undefined) renderCache.delete(oldest);
+  }
+  renderCache.set(key, html);
+  return html;
+}
 
 export class MathWidget extends WidgetType {
   constructor(
@@ -20,17 +53,19 @@ export class MathWidget extends WidgetType {
     const container = document.createElement(isBlock ? 'div' : 'span');
     container.className = isBlock ? 'as-math-block' : 'as-math-inline';
     container.title = 'Click to edit LaTeX formula';
+    // Synchronous placeholder keeps keystroke→paint under budget; the
+    // async upgrade below replaces it when KaTeX arrives.
+    container.textContent = `$${this.latex}$`;
 
-    try {
-      const renderedHtml = katex.renderToString(this.latex.trim(), {
-        displayMode: isBlock,
-        throwOnError: false,
-      });
-      container.innerHTML = renderedHtml;
-    } catch {
-      container.textContent = `$${this.latex}$`;
-      container.style.color = '#ef4444';
-    }
+    void loadKatex().then((katex) => {
+      if (!katex) return;
+      try {
+        container.innerHTML = cachedRender(katex, this.latex, isBlock);
+      } catch {
+        container.textContent = `$${this.latex}$`;
+        container.style.color = '#ef4444';
+      }
+    });
 
     container.addEventListener('click', (e) => {
       const pos = view.posAtDOM(container);

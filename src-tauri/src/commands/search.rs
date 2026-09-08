@@ -41,6 +41,15 @@ fn open_db(root: &Path) -> Result<Connection, String> {
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| e.to_string())?;
+    // Per-query and rebuild hot path: keep SQLite fast and non-blocking.
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "temp_store", "MEMORY")
+        .map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "cache_size", -64000)
+        .map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))
+        .map_err(|e| e.to_string())?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS files(
             path TEXT PRIMARY KEY,
@@ -120,46 +129,67 @@ fn build_fts_query(raw: &str) -> Option<String> {
 
 /// Plain-text context window around the first case-insensitive match.
 /// Returns (snippet, 1-based line number). Never emits HTML.
+///
+/// Perf: avoids allocating a char Vec for the whole body. Only the byte
+/// prefix is scanned for newlines and only the window is collected.
 fn snippet_for(body: &str, query: &str) -> (String, u32) {
+    // Bound the work: matches beyond this still get a title fallback, and
+    // line numbers are computed on the truncated prefix (documented tradeoff
+    // that keeps a 2MB single-line doc from blowing the 16ms budget).
+    const MAX_SCAN_CHARS: usize = 60_000;
+    let scan_len = body
+        .char_indices()
+        .nth(MAX_SCAN_CHARS)
+        .map(|(i, _)| i)
+        .unwrap_or(body.len());
+    let scan = &body[..scan_len];
     let q = query.trim().to_lowercase();
     // For multi-word queries, anchor on the first indexable word.
     let anchor = q
         .split(|c: char| !c.is_alphanumeric())
         .find(|w| !w.is_empty())
         .unwrap_or(q.as_str());
-    let lower = body.to_lowercase();
+    if anchor.is_empty() {
+        return (first_line_snippet(body), 1);
+    }
+    let lower = scan.to_lowercase();
     if let Some(idx) = lower.find(anchor) {
-        let line = body[..idx].matches('\n').count() as u32 + 1;
-        // Char-boundary-safe window.
-        let chars: Vec<char> = body.chars().collect();
-        let anchor_chars: Vec<char> = anchor.chars().collect();
-        // Find char index of byte idx (approx via char count of prefix).
-        let char_idx = body[..idx].chars().count();
+        let line = scan[..idx].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+        let anchor_len_chars = anchor.chars().count();
+        let char_idx = scan[..idx].chars().count();
         let start = char_idx.saturating_sub(60);
-        let end = (char_idx + anchor_chars.len() + 60).min(chars.len());
-        let mut s: String = chars[start..end].iter().collect();
-        s = s.replace('\n', " ").replace('\r', "");
+        // Collect only the window (120 + anchor chars), not the whole doc.
+        let window: String = scan
+            .chars()
+            .skip(start)
+            .take(60 + anchor_len_chars + 60)
+            .collect();
+        let mut s = window.replace('\n', " ").replace('\r', "");
         s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Ellipses need the truncated-scan bounds, not the full doc length.
+        let scan_chars = scan.chars().count();
         if start > 0 {
             s = format!("...{s}");
         }
-        if end < chars.len() {
+        if start + 60 + anchor_len_chars + 60 < scan_chars {
             s.push_str("...");
         }
         let snippet: String = s.chars().take(MAX_SNIPPET_CHARS).collect();
         (snippet, line)
     } else {
-        // Title-only match: first non-empty line.
-        let snippet: String = body
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or("")
-            .chars()
-            .take(MAX_SNIPPET_CHARS)
-            .collect();
-        (snippet, 1)
+        // Title-only match (or match beyond scan window): first line.
+        (first_line_snippet(body), 1)
     }
+}
+
+fn first_line_snippet(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(MAX_SNIPPET_CHARS)
+        .collect()
 }
 
 fn rel_for(root: &Path, abs: &Path) -> String {
@@ -245,38 +275,118 @@ fn collect_markdown_files(root: &Path, limit: usize) -> Vec<PathBuf> {
     out
 }
 
-/// Full rebuild: scan vault, upsert each markdown file, drop stale rows.
+/// Full rebuild: scan vault, upsert changed markdown files, drop stale rows.
 /// Returns number of indexed files.
+///
+/// Perf: single transaction + mtime skip-clean. Unchanged files (same mtime
+/// as stored) skip re-read/re-hash/re-insert, so the second rebuild on a
+/// 10k-file vault is ~stat-only instead of seconds of I/O.
 #[tauri::command]
 pub fn rebuild_search_index(state: tauri::State<VaultState>) -> Result<usize, String> {
     let root = vault_root_from(&state)?;
     let files = collect_markdown_files(&root, 20_000);
-    let conn = open_db(&root)?;
-    let mut indexed = 0usize;
-    for abs in &files {
-        if index_one(&conn, &root, abs).unwrap_or(false) {
-            indexed += 1;
-        }
-    }
-    // Drop rows for files that no longer exist.
-    let wanted: std::collections::HashSet<String> =
-        files.iter().map(|p| p.to_string_lossy().to_string()).collect();
-    let existing: Vec<String> = conn
-        .prepare("SELECT path FROM files")
+    let mut conn = open_db(&root)?;
+
+    // Load stored mtimes once for skip-clean comparison.
+    let stored: std::collections::HashMap<String, i64> = conn
+        .prepare("SELECT path, mtime FROM files")
         .map_err(|e| e.to_string())?
-        .query_map([], |row| row.get(0))
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
         .map_err(|e| e.to_string())?
         .flatten()
         .collect();
-    for path in existing {
-        if !wanted.contains(&path) {
-            conn.execute("DELETE FROM files WHERE path = ?1", params![path])
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut indexed = 0usize;
+    {
+        let mut stmt_file = tx
+            .prepare(
+                "INSERT OR REPLACE INTO files(path, rel, mtime, hash, title, body)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut stmt_del = tx
+            .prepare("DELETE FROM files_fts WHERE path = ?1")
+            .map_err(|e| e.to_string())?;
+        let mut stmt_ins = tx
+            .prepare("INSERT INTO files_fts(path, title, body) VALUES (?1, ?2, ?3)")
+            .map_err(|e| e.to_string())?;
+        for abs in &files {
+            // Fast path: same mtime as stored → assume unchanged.
+            // (Single-file saves go through upsert_search_path anyway.)
+            let path_s = abs.to_string_lossy().to_string();
+            let cur_mtime = file_mtime(abs);
+            if let Some(&prev) = stored.get(&path_s) {
+                if prev == cur_mtime {
+                    indexed += 1;
+                    continue;
+                }
+            }
+            if let Some((title, body, hash, mtime, rel)) =
+                read_indexable(abs, &path_s, &root)?
+            {
+                stmt_file
+                    .execute(params![path_s, rel, mtime, hash, title, body])
+                    .map_err(|e| e.to_string())?;
+                stmt_del.execute(params![path_s]).map_err(|e| e.to_string())?;
+                stmt_ins
+                    .execute(params![path_s, title, body])
+                    .map_err(|e| e.to_string())?;
+                indexed += 1;
+            }
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+
+    // Drop rows for files that no longer exist (outside the txn: few rows).
+    let wanted: std::collections::HashSet<String> =
+        files.iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let stale: Vec<String> = stored
+        .keys()
+        .filter(|p| !wanted.contains(*p))
+        .cloned()
+        .collect();
+    if !stale.is_empty() {
+        let conn2 = open_db(&root)?;
+        for path in stale {
+            conn2
+                .execute("DELETE FROM files WHERE path = ?1", params![path])
                 .map_err(|e| e.to_string())?;
-            conn.execute("DELETE FROM files_fts WHERE path = ?1", params![path])
+            conn2
+                .execute("DELETE FROM files_fts WHERE path = ?1", params![path])
                 .map_err(|e| e.to_string())?;
         }
     }
     Ok(indexed)
+}
+
+/// Read + validate a file for indexing. Returns None for oversize/binary.
+fn read_indexable(
+    abs: &Path,
+    path_s: &str,
+    root: &Path,
+) -> Result<Option<(String, String, String, i64, String)>, String> {
+    let meta = fs::metadata(abs).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_INDEXED_BYTES {
+        return Ok(None);
+    }
+    let bytes = fs::read(abs).map_err(|e| e.to_string())?;
+    const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+    let body_bytes = bytes.strip_prefix(BOM).unwrap_or(&bytes);
+    let body = match std::str::from_utf8(body_bytes) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let _ = path_s;
+    let hash = compute_sha256(&bytes);
+    let mtime = file_mtime(abs);
+    let file_name = abs
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let title = extract_title(body, &file_name);
+    let rel = rel_for(root, abs);
+    Ok(Some((title, body.to_string(), hash, mtime, rel)))
 }
 
 #[tauri::command]
@@ -291,9 +401,13 @@ pub fn search_vault(
     };
     let conn = open_db(&root)?;
     let lim = limit.unwrap_or(30).clamp(1, 100) as i64;
+    // Perf: substr() bounds the per-hit copy to 24k chars instead of up to
+    // 2MB bodies (30 hits × 2MB = 60MB of copies per keystroke-query before).
+    // snippet_for scans at most 60k chars; line numbers past the cap fall
+    // back to the title snippet path — acceptable for the 100ms budget.
     let mut stmt = conn
         .prepare(
-            "SELECT f.path, f.rel, f.title, f.body, rank
+            "SELECT f.path, f.rel, f.title, substr(f.body, 1, 24000), rank
              FROM files_fts JOIN files f ON f.path = files_fts.path
              WHERE files_fts MATCH ?1 ORDER BY rank LIMIT ?2",
         )
@@ -401,6 +515,25 @@ mod tests {
         assert!(!snip.contains('<') || snip.contains("milk"));
         let (t, _) = snippet_for(body, "nomatchxyz");
         assert!(!t.is_empty());
+    }
+
+    #[test]
+    fn snippet_bounds_work_on_huge_bodies() {
+        // 1MB single-line doc must not blow up: bounded scan, fast return.
+        // Needle inside the scan window is found with context.
+        let big = "x".repeat(10_000) + " needle " + &"y".repeat(900_000);
+        let start = std::time::Instant::now();
+        let (snip, _) = snippet_for(&big, "needle");
+        assert!(start.elapsed().as_millis() < 500, "snippet took too long");
+        assert!(snip.contains("needle"));
+        assert!(snip.len() <= 300);
+        // Needle past the scan window falls back to the title snippet
+        // instead of scanning megabytes — still fast and non-empty.
+        let far = "x".repeat(200_000) + " needle " + &"y".repeat(200_000);
+        let start = std::time::Instant::now();
+        let (snip2, _) = snippet_for(&far, "needle");
+        assert!(start.elapsed().as_millis() < 500, "far snippet took too long");
+        assert!(!snip2.is_empty());
     }
 
     #[test]
