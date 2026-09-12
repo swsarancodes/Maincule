@@ -55,17 +55,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.6.0
-          releaseName: 'Manicule v0.6.0'
+          tagName: v0.6.1
+          releaseName: 'Manicule v0.6.1'
           releaseBody: |
-            ### Manicule ☞ — Distraction-Free Markdown Studio
+            ### Manicule ☞ v0.6.1 — Distraction-Free Markdown Studio
 
             Manicule edits Markdown visually while treating your `.md` file as the single source of truth.
+            Apple silicon native — grab the Universal build, no Rosetta needed.
+
+            #### ✨ New: Paste-as-Markdown
+            - Pasting rich clipboard content (`text/html`) now converts to clean Markdown — never live HTML in your buffer, never throws.
+            - Pasted/dropped images upload as portable vault assets (`.assets/…`) with a single-undo `uploading-…` placeholder, so typing mid-upload can't corrupt offsets.
+
+            #### 🐞 Fixed
+            - **Note numbering reuses freed numbers** — create `Untitled-1…5`, trash them, and the next notes start at `Untitled-1` again instead of `Untitled-6`. Same for `New Folder N`. Restoring from Trash auto-suffixes (` - 2`) on collision instead of duplicating.
+            - **Closing a tab no longer trashes vault files** — the tab drops, the file stays on disk, Trash stays empty. Unsaved local notes still close into Trash as a safety net.
+            - **External edits no longer vanish** — the watcher compared timestamps before content hashes, silently swallowing edits made right after a save. It now decides purely on content hash: same bytes = quiet echo, new bytes = reload or conflict banner.
+            - **Vault sync survives vault switching** — closing a vault tore down the watcher listener but left the started-guard set, so the next vault stayed deaf to external changes. Both are now reset together.
 
             #### Download & Install
             Choose the installer for your operating system below:
+            - **macOS Universal (all Macs, Apple silicon + Intel)**: `Manicule_*_universal.dmg`
             - **macOS (Apple Silicon M1/M2/M3/M4)**: `Manicule_*_aarch64.dmg`
-            - **macOS (Intel)**: `Manicule_*_x64.dmg`
+            - **macOS (Intel, legacy)**: `Manicule_*_x64.dmg`
             - **Windows**: `Manicule_*_x64-setup.exe` or `Manicule_*_x64_en-US.msi`
             - **Linux**: `manicule_*_amd64.AppImage` or `manicule_*_amd64.deb`
 
