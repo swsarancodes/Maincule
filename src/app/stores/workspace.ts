@@ -620,7 +620,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             let n = 1;
             const existingNames = new Set(
               state.documents
-                .filter((d) => d.parentId === parentId)
+                .filter((d) => d.parentId === parentId && !d.deletedAt)
                 .map((d) => d.meta.fileName.toLowerCase())
             );
             while (existingNames.has(`untitled-${n}.md`) || existingNames.has(`untitled-${n}`)) {
@@ -658,7 +658,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             let n = 1;
             const existing = new Set(
               state.folders
-                .filter((f) => f.parentId === parentId)
+                .filter((f) => f.parentId === parentId && !f.deletedAt)
                 .map((f) => f.name.toLowerCase())
             );
             while (existing.has(`new folder ${n}`.toLowerCase()) || (n === 1 && existing.has('new folder'))) {
@@ -873,8 +873,32 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               state.folders.some((f) => f.id === nowDoc.parentId && f.deletedAt);
             const nextParentId = parentIsDeleted ? null : nowDoc.parentId;
 
+            // Name reuse: trashed names no longer reserve Untitled-N, so a
+            // restore may collide with a live doc created afterwards.
+            // Suffix the restored copy (" - 2", " - 3", ...) instead of duplicating.
+            const liveNames = new Set(
+              state.documents
+                .filter((d) => d.id !== id && !d.deletedAt && d.parentId === nextParentId)
+                .map((d) => d.meta.fileName.toLowerCase())
+            );
+            let restoredName = nowDoc.meta.fileName;
+            if (liveNames.has(restoredName.toLowerCase())) {
+              const dot = restoredName.lastIndexOf('.');
+              const stem = dot > 0 ? restoredName.slice(0, dot) : restoredName;
+              const ext = dot > 0 ? restoredName.slice(dot) : '';
+              let n = 2;
+              while (liveNames.has(`${stem} - ${n}${ext}`.toLowerCase())) n++;
+              restoredName = `${stem} - ${n}${ext}`;
+            }
+
             const nextDocs = state.documents.map((d) => {
-              if (d.id === id) return { ...d, deletedAt: null, parentId: nextParentId };
+              if (d.id === id)
+                return {
+                  ...d,
+                  deletedAt: null,
+                  parentId: nextParentId,
+                  meta: { ...d.meta, fileName: restoredName },
+                };
               if (idsToRestore.has(d.id)) return { ...d, deletedAt: null };
               return d;
             });
@@ -895,8 +919,23 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             );
             const nextParentId = parentIsDeleted ? null : nowFolder.parentId;
 
+            // Same collision guard as docs: trashed folder names are reusable,
+            // so suffix the restored copy when a live sibling took the name.
+            const liveFolderNames = new Set(
+              state.folders
+                .filter((f) => f.id !== id && !f.deletedAt && f.parentId === nextParentId)
+                .map((f) => f.name.toLowerCase())
+            );
+            let restoredFolderName = nowFolder.name;
+            if (liveFolderNames.has(restoredFolderName.toLowerCase())) {
+              let n = 2;
+              while (liveFolderNames.has(`${restoredFolderName} - ${n}`.toLowerCase())) n++;
+              restoredFolderName = `${restoredFolderName} - ${n}`;
+            }
+
             const nextFolders = state.folders.map((f) => {
-              if (f.id === id) return { ...f, deletedAt: null, parentId: nextParentId };
+              if (f.id === id)
+                return { ...f, deletedAt: null, parentId: nextParentId, name: restoredFolderName };
               if (folderIdsToRestore.has(f.id)) return { ...f, deletedAt: null };
               return f;
             });
