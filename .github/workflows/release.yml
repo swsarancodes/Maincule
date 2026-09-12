@@ -55,10 +55,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v0.6.1
-          releaseName: 'Manicule v0.6.1'
+          tagName: v0.6.2
+          releaseName: 'Manicule v0.6.2'
           releaseBody: |
-            ### Manicule ☞ v0.6.1 — Distraction-Free Markdown Studio
+            ### Manicule ☞ v0.6.2 — Distraction-Free Markdown Studio
 
             Manicule edits Markdown visually while treating your `.md` file as the single source of truth.
             Apple silicon native — grab the Universal build, no Rosetta needed.
@@ -68,6 +68,7 @@ jobs:
             - Pasted/dropped images upload as portable vault assets (`.assets/…`) with a single-undo `uploading-…` placeholder, so typing mid-upload can't corrupt offsets.
 
             #### 🐞 Fixed
+            - **Blank window on launch (v0.6.0/v0.6.1)** — the production bundler split CodeMirror into two circular chunks, throwing at load so the app opened empty. All CodeMirror packages now ship in one chunk. If you downloaded v0.6.1, please re-download v0.6.2.
             - **Note numbering reuses freed numbers** — create `Untitled-1…5`, trash them, and the next notes start at `Untitled-1` again instead of `Untitled-6`. Same for `New Folder N`. Restoring from Trash auto-suffixes (` - 2`) on collision instead of duplicating.
             - **Closing a tab no longer trashes vault files** — the tab drops, the file stays on disk, Trash stays empty. Unsaved local notes still close into Trash as a safety net.
             - **External edits no longer vanish** — the watcher compared timestamps before content hashes, silently swallowing edits made right after a save. It now decides purely on content hash: same bytes = quiet echo, new bytes = reload or conflict banner.
