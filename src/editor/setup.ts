@@ -12,7 +12,8 @@ import { lineSelectionExtension } from './decorations/line-selection';
 import { wikilinkAutocompleteExtension } from './completions/wikilink-completion';
 import { AsterismSearchPanel } from './search-panel';
 import { useWorkspaceStore } from '../app/stores/workspace';
-import { storeImageFile, fileToDataUrl } from '../ipc/vault';
+import { storeImageFile, fileToDataUrl, dataUrlToAsset } from '../ipc/vault';
+import { htmlToMarkdown, isImageUrl } from '../core/markdown/paste';
 
 export interface EditorSetupOptions {
   initialDoc?: string;
@@ -104,12 +105,36 @@ export function findLinkUrlAt(view: EditorView, pos: number, _targetEl?: HTMLEle
 }
 
 /**
- * Image Paste & Drop Handler:
- * Pasted/dropped images become vault assets (`.assets/…`, portable relative
- * URL) when a vault is open in the desktop shell; otherwise they embed as
- * inline data URLs exactly like before.
+ * Image Paste & Drop Handler (+ A9 paste-as-Markdown):
+ * Priority per paste event: image file > text/html > image-URL text >
+ * default. Pasted/dropped images become vault assets (`.assets/…`, portable
+ * relative URL) when a vault is open in the desktop shell; otherwise they
+ * embed as inline data URLs exactly like before.
+ *
+ * Async image stores insert a unique `uploading-<id>` placeholder
+ * synchronously (single undo step with the paste/drop), then replace just
+ * the placeholder token when the bytes land — so typing during the upload
+ * never corrupts offsets.
  */
 export function imagePasteDropExtension(): Extension {
+  const randId = () =>
+    Math.floor(Math.random() * 0xffffff)
+      .toString(16)
+      .padStart(6, '0');
+
+  const replaceToken = (view: EditorView, token: string, alt: string, url: string) => {
+    if (!view.dom.isConnected) return;
+    const full = view.state.doc.toString();
+    const idx = full.indexOf(token);
+    if (idx === -1) return;
+    view.dispatch({
+      changes: { from: idx, to: idx + token.length, insert: url },
+      // Keep the caret near the resolved image when it was at the end.
+      selection: undefined,
+    });
+    void alt;
+  };
+
   const insertImageAt = (view: EditorView, pos: number, alt: string, url: string) => {
     const doc = view.state.doc;
     const line = doc.lineAt(pos);
@@ -122,8 +147,25 @@ export function imagePasteDropExtension(): Extension {
     });
   };
 
-  const handleImageFile = (file: File, view: EditorView, pos: number) => {
-    const cleanName = file.name ? file.name.replace(/\.[^/.]+$/, '') : 'Image';
+  /** Insert `![alt](uploading-<id>)` placeholders for N files in ONE transaction. */
+  const insertPlaceholders = (view: EditorView, pos: number, alts: string[]): string[] => {
+    const doc = view.state.doc;
+    const line = doc.lineAt(Math.min(pos, doc.length));
+    const needLeadingNewline =
+      pos > line.from && !doc.sliceString(Math.max(line.from, pos - 1), pos).endsWith('\n');
+    const tokens = alts.map(() => `uploading-${randId()}`);
+    const combined =
+      (needLeadingNewline ? '\n' : '') +
+      alts.map((alt, i) => `![${alt}](${tokens[i]})\n`).join('') ;
+    const livePos = Math.min(pos, view.state.doc.length);
+    view.dispatch({
+      changes: { from: livePos, insert: combined },
+      selection: { anchor: livePos + combined.length },
+    });
+    return tokens;
+  };
+
+  const resolveImageFile = (file: File, view: EditorView, token: string, alt: string) => {
     const store = useWorkspaceStore.getState();
     const activeDoc = store.documents.find((d) => d.id === store.activeDocumentId);
     const docFileName = activeDoc?.meta.fileName ?? 'note.md';
@@ -131,68 +173,101 @@ export function imagePasteDropExtension(): Extension {
       try {
         // Vault asset when possible; data-URL fallback otherwise.
         const url = await storeImageFile(file, docFileName, store.vaultRoot);
-        if (!view.dom.isConnected) return;
-        insertImageAt(view, pos, cleanName, url);
+        replaceToken(view, token, alt, url);
       } catch (e) {
         console.warn('Image store failed, embedding inline:', e);
-        if (!view.dom.isConnected) return;
         try {
-          insertImageAt(view, pos, cleanName, await fileToDataUrl(file));
+          replaceToken(view, token, alt, await fileToDataUrl(file));
         } catch {
-          // ignore: unreadable file
+          // ignore: unreadable file — placeholder stays visible, never corrupts text
         }
       }
     })();
   };
 
+  const handleImageFiles = (files: File[], view: EditorView, pos: number) => {
+    const images = files.filter((f) => f.type.startsWith('image/'));
+    if (images.length === 0) return false;
+    const alts = images.map((f) => (f.name ? f.name.replace(/\.[^/.]+$/, '') : 'Image'));
+    const tokens = insertPlaceholders(view, pos, alts);
+    images.forEach((file, i) => resolveImageFile(file, view, tokens[i], alts[i]));
+    return true;
+  };
+
   return EditorView.domEventHandlers({
     paste(e, view) {
-      // 1. Check for image items in clipboard (e.g. screenshot, copied image in browser)
+      // 1. Image items (screenshot, copied image): placeholder + async vault store.
       const items = e.clipboardData?.items;
       if (items) {
+        const imageFiles: File[] = [];
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
           if (item.type.startsWith('image/')) {
             const file = item.getAsFile();
-            if (file) {
-              e.preventDefault();
-              e.stopPropagation();
-              const pos = view.state.selection.main.from;
-              handleImageFile(file, view, pos);
-              return true;
-            }
+            if (file) imageFiles.push(file);
           }
+        }
+        if (imageFiles.length > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          handleImageFiles(imageFiles, view, view.state.selection.main.from);
+          return true;
         }
       }
 
-      // 2. Check for image files in clipboard
+      // 2. Image files in clipboard
       const files = e.clipboardData?.files;
       if (files && files.length > 0) {
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
-          if (file.type.startsWith('image/')) {
-            e.preventDefault();
-            e.stopPropagation();
-            const pos = view.state.selection.main.from;
-            handleImageFile(file, view, pos);
-            return true;
-          }
+        const imageFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
+        if (imageFiles.length > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          handleImageFiles(imageFiles, view, view.state.selection.main.from);
+          return true;
         }
       }
 
-      // 3. Check if clipboard text is an image URL (e.g. https://.../picture.png or data:image/...)
+      // 3. Rich HTML -> Markdown (A9). Before plain-text handling so web-page
+      // pastes keep headings/lists/code instead of collapsing to text.
+      const html = e.clipboardData?.getData('text/html');
+      if (html && /<[a-zA-Z][^>]*>/.test(html)) {
+        const md = htmlToMarkdown(html);
+        if (md) {
+          e.preventDefault();
+          e.stopPropagation();
+          const changes = view.state.selection.ranges.map((r) => ({
+            from: r.from,
+            to: r.to,
+            insert: md,
+          }));
+          view.dispatch({ changes, scrollIntoView: true });
+          return true;
+        }
+      }
+
+      // 4. Clipboard text is an image URL (remote or data:) on an empty line.
       const text = e.clipboardData?.getData('text/plain')?.trim();
       if (text) {
-        const isImageUrl =
-          /^https?:\/\/[^\s]+?\.(png|jpg|jpeg|gif|webp|svg)(\?[^\s]*)?$/i.test(text) ||
-          /^data:image\/[a-zA-Z+]+;base64,/i.test(text);
         const sel = view.state.selection.main;
-        if (isImageUrl && sel.empty) {
+        if (isImageUrl(text) && sel.empty) {
           const line = view.state.doc.lineAt(sel.from);
           if (line.text.trim() === '') {
             e.preventDefault();
             e.stopPropagation();
-            insertImageAt(view, sel.from, 'Image', text);
+            if (text.startsWith('data:image/')) {
+              const store = useWorkspaceStore.getState();
+              const activeDoc = store.documents.find((d) => d.id === store.activeDocumentId);
+              if (store.vaultRoot && activeDoc) {
+                const [token] = insertPlaceholders(view, sel.from, ['Image']);
+                void dataUrlToAsset(text, activeDoc.meta.fileName, store.vaultRoot)
+                  .then((rel) => replaceToken(view, token, 'Image', rel ?? text))
+                  .catch(() => replaceToken(view, token, 'Image', text));
+              } else {
+                insertImageAt(view, sel.from, 'Image', text);
+              }
+            } else {
+              insertImageAt(view, sel.from, 'Image', text);
+            }
             return true;
           }
         }
@@ -204,16 +279,17 @@ export function imagePasteDropExtension(): Extension {
     drop(e, view) {
       const files = e.dataTransfer?.files;
       if (files && files.length > 0) {
-        for (let i = 0; i < files.length; i++) {
-          const file = files[i];
-          if (file.type.startsWith('image/')) {
-            e.preventDefault();
-            e.stopPropagation();
-            const dropPos = view.posAtCoords({ x: e.clientX, y: e.clientY });
-            const pos = dropPos !== null ? dropPos : view.state.selection.main.from;
-            handleImageFile(file, view, pos);
-            return true;
-          }
+        const imageFiles = Array.from(files).filter((f) => f.type.startsWith('image/'));
+        if (imageFiles.length > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          const dropPos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+          handleImageFiles(
+            imageFiles,
+            view,
+            dropPos !== null ? dropPos : view.state.selection.main.from
+          );
+          return true;
         }
       }
       return false;
