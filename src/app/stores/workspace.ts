@@ -451,13 +451,12 @@ async function flushDocSave(id: string): Promise<void> {
 }
 
 /**
- * Shared post-save bookkeeping: the saved text becomes the new clean baseline,
- * the Rust-issued hash arms the next conflict guard, and the timestamp tells
- * the watcher to ignore its own echo.
+ * Shared post-save bookkeeping: the saved text becomes the new clean baseline
+ * and the Rust-issued hash arms the next conflict guard (the watcher tells
+ * our own save echo apart from external edits by content hash).
  */
 function applySaveSuccess(id: string, hash: string, mtime: number, savedText: string): void {
   const path = useWorkspaceStore.getState().documents.find((d) => d.id === id)?.meta.filePath;
-  if (path) lastOwnSaveAt.set(path, Date.now());
   useWorkspaceStore.setState((s) => ({
     documents: s.documents.map((d) => {
       if (d.id !== id) return d;
@@ -498,10 +497,9 @@ export async function flushPendingSaves(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const RECONCILE_DEBOUNCE_MS = 400;
-const OWN_SAVE_QUIET_MS = 1500;
 const reconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const lastOwnSaveAt = new Map<string, number>();
 let vaultSyncActive = false;
+let vaultUnlisten: (() => void) | null = null;
 
 /** Replace a doc's content with disk state (silent reload / Load disk). */
 function adoptDiskResult(id: string, result: FileReadResult): void {
@@ -545,8 +543,10 @@ async function reconcileVaultPath(path: string): Promise<void> {
   const fileName = path.split(/[/\\]/).pop() ?? '';
   // Our atomic-write temp files and hidden files never concern the UI.
   if (!fileName || fileName.startsWith('.tmp_') || fileName.startsWith('.')) return;
-  const lastOwn = lastOwnSaveAt.get(path);
-  if (lastOwn && Date.now() - lastOwn < OWN_SAVE_QUIET_MS) return;
+  // NOTE: no own-save quiet-window here. The content-hash check below already
+  // tells save echoes (same bytes) apart from real external edits (new bytes);
+  // a timestamp early-return would swallow external edits that land within
+  // milliseconds of our own save and leave a stale buffer with no banner.
 
   const st = useWorkspaceStore.getState();
   const doc = st.documents.find((d) => d.meta.filePath === path && !d.deletedAt);
@@ -822,7 +822,52 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       },
 
       closeDocument: (id: string) => {
-        get().deleteDocument(id);
+        const doc = get().documents.find((d) => d.id === id);
+        if (!doc) return;
+        // Unsaved local notes have no file to reopen from — close them into
+        // Trash as a safety net.
+        if (!doc.meta.filePath) {
+          get().deleteDocument(id);
+          return;
+        }
+        // Disk-backed files stay on disk; closing only drops the tab.
+        // Subpages are reparented to the closed tab's parent so closing a tab
+        // never destroys content.
+        const descendantDocIds = getDescendantDocIds(id, get().documents);
+        const idsToClose = new Set([id, ...descendantDocIds]);
+        set((state) => {
+          const viewState = { ...state.docViewState };
+          for (const cid of idsToClose) delete viewState[cid];
+          const nextDocs = state.documents
+            .filter((d) => !idsToClose.has(d.id))
+            .map((d) =>
+              d.parentId === id ? { ...d, parentId: doc.parentId ?? null } : d
+            );
+          if (nextDocs.length === 0) {
+            const fresh = createDocumentState('', null);
+            fresh.meta.fileName = 'Untitled-1.md';
+            return {
+              documents: [fresh],
+              activeDocumentId: fresh.id,
+              wordCount: 0,
+              charCount: 0,
+              readingTimeMin: 0,
+              docViewState: viewState,
+            };
+          }
+          const nextActive = idsToClose.has(state.activeDocumentId || '')
+            ? (nextDocs[0]?.id ?? null)
+            : state.activeDocumentId;
+          const activeDoc = nextDocs.find((d) => d.id === nextActive);
+          return {
+            documents: nextDocs,
+            activeDocumentId: nextActive,
+            wordCount: activeDoc ? computeWordCount(activeDoc.currentText) : 0,
+            charCount: activeDoc ? activeDoc.currentText.length : 0,
+            readingTimeMin: activeDoc ? computeReadingTime(computeWordCount(activeDoc.currentText)) : 0,
+            docViewState: viewState,
+          };
+        });
       },
 
       deleteDocument: (id: string) => {
@@ -1187,6 +1232,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         if (isTauriEnvironment()) {
           stopVaultWatch().catch(() => {});
         }
+        // Tear down the watcher listener and disarm the guard so opening
+        // another vault re-registers sync instead of staying deaf.
+        if (vaultUnlisten) {
+          try {
+            vaultUnlisten();
+          } catch {
+            /* listener already torn down */
+          }
+          vaultUnlisten = null;
+        }
+        vaultSyncActive = false;
         set({ vaultRoot: null, vaultEntries: [] });
       },
 
@@ -1287,7 +1343,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             if (useWorkspaceStore.getState().vaultRoot) {
               await startVaultWatch().catch((e) => console.warn('Vault watch failed:', e));
             }
-            await listen<VaultChangeEvent>('vault://file-changed', (event) => {
+            vaultUnlisten = await listen<VaultChangeEvent>('vault://file-changed', (event) => {
               // Note: `kind` is intentionally unread — by the time the debounce
               // fires we re-read the file and compare hashes, which subsumes
               // created/modified/removed races (e.g. atomic-save dances).
