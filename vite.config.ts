@@ -34,14 +34,17 @@ export default defineConfig(async () => ({
     rollupOptions: {
       output: {
         manualChunks: {
+          // NOTE: all CodeMirror packages must live in ONE chunk. Splitting
+          // autocomplete/search into a separate chunk creates a circular
+          // chunk split (they import from state/view/language and back),
+          // which throws "Cannot access before initialization" at load and
+          // ships a completely blank production window (dev is unaffected).
           "vendor-codemirror": [
             "@codemirror/state",
             "@codemirror/view",
             "@codemirror/commands",
             "@codemirror/language",
             "@codemirror/lang-markdown",
-          ],
-          "vendor-codemirror-extra": [
             "@codemirror/autocomplete",
             "@codemirror/search",
           ],
